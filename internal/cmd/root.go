@@ -91,6 +91,10 @@ func init() {
 	rootCmd.AddCommand(dbCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(reactCmd)
+	rootCmd.AddCommand(reactionsCmd)
+	rootCmd.AddCommand(markCmd)
+	rootCmd.AddCommand(remindersCmd)
 }
 
 func initConfig() {

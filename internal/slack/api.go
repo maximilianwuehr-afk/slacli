@@ -980,7 +980,495 @@ func (a *API) GetMyChannelIDs(days int) ([]string, error) {
 	return channels, nil
 }
 
-// HTTP helpers
+// ============================================================================
+// REACTIONS
+// ============================================================================
+
+// AddReaction adds an emoji reaction to a message
+func (a *API) AddReaction(channelID, timestamp, emoji string) error {
+	payload := map[string]interface{}{
+		"channel":   channelID,
+		"timestamp": timestamp,
+		"name":      strings.TrimSuffix(strings.TrimPrefix(emoji, ":"), ":"),
+	}
+
+	resp, err := a.post("reactions.add", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		// "already_reacted" is not really an error
+		if result.Error == "already_reacted" {
+			return nil
+		}
+		return fmt.Errorf("reactions.add: %s", result.Error)
+	}
+	return nil
+}
+
+// RemoveReaction removes an emoji reaction from a message
+func (a *API) RemoveReaction(channelID, timestamp, emoji string) error {
+	payload := map[string]interface{}{
+		"channel":   channelID,
+		"timestamp": timestamp,
+		"name":      strings.TrimSuffix(strings.TrimPrefix(emoji, ":"), ":"),
+	}
+
+	resp, err := a.post("reactions.remove", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("reactions.remove: %s", result.Error)
+	}
+	return nil
+}
+
+// GetReactions gets reactions for a specific message
+func (a *API) GetReactions(channelID, timestamp string) ([]ReactionInfo, error) {
+	params := url.Values{
+		"channel":   {channelID},
+		"timestamp": {timestamp},
+		"full":      {"true"},
+	}
+
+	resp, err := a.get("reactions.get", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error,omitempty"`
+		Type    string `json:"type"`
+		Message struct {
+			Reactions []ReactionInfo `json:"reactions"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("reactions.get: %s", result.Error)
+	}
+	return result.Message.Reactions, nil
+}
+
+// ============================================================================
+// MARK AS READ
+// ============================================================================
+
+// MarkChannel marks a channel as read up to a specific timestamp
+// If timestamp is empty, marks the entire channel as read
+func (a *API) MarkChannel(channelID, timestamp string) error {
+	payload := map[string]interface{}{
+		"channel": channelID,
+	}
+	if timestamp != "" {
+		payload["ts"] = timestamp
+	} else {
+		// Get latest message timestamp
+		history, err := a.GetHistory(channelID, "", 1, "", "")
+		if err != nil {
+			return err
+		}
+		if len(history.Messages) > 0 {
+			payload["ts"] = history.Messages[0].TS
+		}
+	}
+
+	resp, err := a.post("conversations.mark", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("conversations.mark: %s", result.Error)
+	}
+	return nil
+}
+
+// ============================================================================
+// MESSAGE EDIT / DELETE
+// ============================================================================
+
+// UpdateMessage edits an existing message
+func (a *API) UpdateMessage(channelID, timestamp, text string) (output.SendResult, error) {
+	payload := map[string]interface{}{
+		"channel": channelID,
+		"ts":      timestamp,
+		"text":    text,
+	}
+
+	resp, err := a.post("chat.update", payload)
+	if err != nil {
+		return output.SendResult{}, err
+	}
+
+	var result struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error,omitempty"`
+		Channel string `json:"channel"`
+		TS      string `json:"ts"`
+		Text    string `json:"text"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return output.SendResult{}, err
+	}
+	if !result.OK {
+		return output.SendResult{}, fmt.Errorf("chat.update: %s", result.Error)
+	}
+
+	return output.SendResult{
+		Channel:   result.Channel,
+		ChannelID: channelID,
+		Timestamp: result.TS,
+		MessageID: result.TS,
+	}, nil
+}
+
+// DeleteMessage deletes a message
+func (a *API) DeleteMessage(channelID, timestamp string) error {
+	payload := map[string]interface{}{
+		"channel": channelID,
+		"ts":      timestamp,
+	}
+
+	resp, err := a.post("chat.delete", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("chat.delete: %s", result.Error)
+	}
+	return nil
+}
+
+// GetPermalink gets a permalink URL for a message
+func (a *API) GetPermalink(channelID, timestamp string) (string, error) {
+	params := url.Values{
+		"channel":    {channelID},
+		"message_ts": {timestamp},
+	}
+
+	resp, err := a.get("chat.getPermalink", params)
+	if err != nil {
+		return "", err
+	}
+
+	var result struct {
+		OK        bool   `json:"ok"`
+		Error     string `json:"error,omitempty"`
+		Permalink string `json:"permalink"`
+		Channel   string `json:"channel"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	if !result.OK {
+		return "", fmt.Errorf("chat.getPermalink: %s", result.Error)
+	}
+	return result.Permalink, nil
+}
+
+// ============================================================================
+// REMINDERS
+// ============================================================================
+
+// Reminder represents a Slack reminder
+type Reminder struct {
+	ID         string `json:"id"`
+	Creator    string `json:"creator"`
+	User       string `json:"user"`
+	Text       string `json:"text"`
+	Recurring  bool   `json:"recurring"`
+	Time       int64  `json:"time"`
+	CompleteTS int64  `json:"complete_ts"`
+}
+
+// AddReminder creates a new reminder
+// time can be Unix timestamp, natural language ("in 2 hours"), or specific time ("tomorrow at 10am")
+func (a *API) AddReminder(text, timeStr, userID string) (*Reminder, error) {
+	payload := map[string]interface{}{
+		"text": text,
+		"time": timeStr,
+	}
+	if userID != "" {
+		payload["user"] = userID
+	}
+
+	resp, err := a.post("reminders.add", payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK       bool     `json:"ok"`
+		Error    string   `json:"error,omitempty"`
+		Reminder Reminder `json:"reminder"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("reminders.add: %s", result.Error)
+	}
+	return &result.Reminder, nil
+}
+
+// ListReminders returns all reminders for the user
+func (a *API) ListReminders() ([]Reminder, error) {
+	resp, err := a.get("reminders.list", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK        bool       `json:"ok"`
+		Error     string     `json:"error,omitempty"`
+		Reminders []Reminder `json:"reminders"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("reminders.list: %s", result.Error)
+	}
+	return result.Reminders, nil
+}
+
+// CompleteReminder marks a reminder as complete
+func (a *API) CompleteReminder(reminderID string) error {
+	payload := map[string]interface{}{
+		"reminder": reminderID,
+	}
+
+	resp, err := a.post("reminders.complete", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("reminders.complete: %s", result.Error)
+	}
+	return nil
+}
+
+// DeleteReminder deletes a reminder
+func (a *API) DeleteReminder(reminderID string) error {
+	payload := map[string]interface{}{
+		"reminder": reminderID,
+	}
+
+	resp, err := a.post("reminders.delete", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("reminders.delete: %s", result.Error)
+	}
+	return nil
+}
+
+// GetReminderInfo gets info about a specific reminder
+func (a *API) GetReminderInfo(reminderID string) (*Reminder, error) {
+	params := url.Values{
+		"reminder": {reminderID},
+	}
+
+	resp, err := a.get("reminders.info", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK       bool     `json:"ok"`
+		Error    string   `json:"error,omitempty"`
+		Reminder Reminder `json:"reminder"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("reminders.info: %s", result.Error)
+	}
+	return &result.Reminder, nil
+}
+
+// ============================================================================
+// USERS (EXTENDED)
+// ============================================================================
+
+// GetUserInfo gets detailed info about a user
+func (a *API) GetUserInfo(userID string) (*UserInfo, error) {
+	params := url.Values{
+		"user": {userID},
+	}
+
+	resp, err := a.get("users.info", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK    bool     `json:"ok"`
+		Error string   `json:"error,omitempty"`
+		User  UserInfo `json:"user"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("users.info: %s", result.Error)
+	}
+	return &result.User, nil
+}
+
+// GetUserByEmail looks up a user by email address
+func (a *API) GetUserByEmail(email string) (*UserInfo, error) {
+	params := url.Values{
+		"email": {email},
+	}
+
+	resp, err := a.get("users.lookupByEmail", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK    bool     `json:"ok"`
+		Error string   `json:"error,omitempty"`
+		User  UserInfo `json:"user"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("users.lookupByEmail: %s", result.Error)
+	}
+	return &result.User, nil
+}
+
+// UserPresence represents a user's presence status
+type UserPresence struct {
+	Presence        string `json:"presence"` // "active" or "away"
+	Online          bool   `json:"online"`
+	AutoAway        bool   `json:"auto_away"`
+	ManualAway      bool   `json:"manual_away"`
+	ConnectionCount int    `json:"connection_count"`
+	LastActivity    int64  `json:"last_activity,omitempty"`
+}
+
+// GetUserPresence gets a user's presence status
+func (a *API) GetUserPresence(userID string) (*UserPresence, error) {
+	params := url.Values{
+		"user": {userID},
+	}
+
+	resp, err := a.get("users.getPresence", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error,omitempty"`
+		Presence string `json:"presence"`
+		Online   bool   `json:"online"`
+		AutoAway bool   `json:"auto_away"`
+		ManualAway bool `json:"manual_away"`
+		ConnectionCount int `json:"connection_count"`
+		LastActivity int64 `json:"last_activity"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("users.getPresence: %s", result.Error)
+	}
+	return &UserPresence{
+		Presence:        result.Presence,
+		Online:          result.Online,
+		AutoAway:        result.AutoAway,
+		ManualAway:      result.ManualAway,
+		ConnectionCount: result.ConnectionCount,
+		LastActivity:    result.LastActivity,
+	}, nil
+}
+
+// SetUserPresence sets the current user's presence
+func (a *API) SetUserPresence(presence string) error {
+	payload := map[string]interface{}{
+		"presence": presence, // "auto" or "away"
+	}
+
+	resp, err := a.post("users.setPresence", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("users.setPresence: %s", result.Error)
+	}
+	return nil
+}
+
+// ============================================================================
+// HTTP HELPERS
+// ============================================================================
 
 func (a *API) get(method string, params url.Values) ([]byte, error) {
 	u := baseURL + "/" + method

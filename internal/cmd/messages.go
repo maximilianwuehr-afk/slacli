@@ -10,6 +10,7 @@ import (
 	"slacli/internal/config"
 	"slacli/internal/db"
 	"slacli/internal/output"
+	"slacli/internal/slack"
 	"slacli/internal/sync"
 )
 
@@ -51,6 +52,46 @@ var messagesUnreadCmd = &cobra.Command{
 	RunE:  runMessagesUnread,
 }
 
+var messagesEditCmd = &cobra.Command{
+	Use:   "edit <channel> <timestamp> <new-text>",
+	Short: "Edit an existing message",
+	Long: `Edit a message you previously sent.
+
+You can only edit your own messages. The message will show an "edited" indicator.
+
+Examples:
+  slack messages edit "#general" 1704540600.123456 "Updated message text"
+  slack messages edit C123ABC 1704540600.123456 "Fixed typo"`,
+	Args: cobra.ExactArgs(3),
+	RunE: runMessagesEdit,
+}
+
+var messagesDeleteCmd = &cobra.Command{
+	Use:   "delete <channel> <timestamp>",
+	Short: "Delete a message",
+	Long: `Delete a message you previously sent.
+
+You can only delete your own messages (unless you're a workspace admin).
+
+Examples:
+  slack messages delete "#general" 1704540600.123456
+  slack messages delete C123ABC 1704540600.123456`,
+	Args: cobra.ExactArgs(2),
+	RunE: runMessagesDelete,
+}
+
+var messagesPermalinkCmd = &cobra.Command{
+	Use:   "permalink <channel> <timestamp>",
+	Short: "Get a permalink URL for a message",
+	Long: `Get the permanent URL for a specific message.
+
+Examples:
+  slack messages permalink "#general" 1704540600.123456
+  slack messages permalink C123ABC 1704540600.123456`,
+	Args: cobra.ExactArgs(2),
+	RunE: runMessagesPermalink,
+}
+
 var (
 	// List flags
 	msgListChannel string
@@ -80,6 +121,9 @@ func init() {
 	messagesCmd.AddCommand(messagesSearchCmd)
 	messagesCmd.AddCommand(messagesContextCmd)
 	messagesCmd.AddCommand(messagesUnreadCmd)
+	messagesCmd.AddCommand(messagesEditCmd)
+	messagesCmd.AddCommand(messagesDeleteCmd)
+	messagesCmd.AddCommand(messagesPermalinkCmd)
 
 	// List flags
 	messagesListCmd.Flags().StringVar(&msgListChannel, "channel", "", "channel name, ID, or email for DM (required)")
@@ -277,5 +321,87 @@ func syncUnreadChannels(cfg *config.Config) error {
 		output.Info("Synced %d new messages from %d unread channels", result.MessagesSynced, result.ChannelsSynced)
 	}
 
+	return nil
+}
+
+func runMessagesEdit(cmd *cobra.Command, args []string) error {
+	channel := args[0]
+	timestamp := args[1]
+	newText := args[2]
+
+	cfg := config.Get()
+	client, err := auth.GetClient(cfg)
+	if err != nil {
+		return fmt.Errorf("auth required: %w", err)
+	}
+
+	api := slack.NewAPI(client)
+
+	// Resolve channel
+	channelID, err := api.ResolveChannel(channel)
+	if err != nil {
+		return fmt.Errorf("resolve channel: %w", err)
+	}
+
+	result, err := api.UpdateMessage(channelID, timestamp, newText)
+	if err != nil {
+		return err
+	}
+
+	output.Success(fmt.Sprintf("Updated message %s", result.Timestamp))
+	output.Print(result)
+	return nil
+}
+
+func runMessagesDelete(cmd *cobra.Command, args []string) error {
+	channel := args[0]
+	timestamp := args[1]
+
+	cfg := config.Get()
+	client, err := auth.GetClient(cfg)
+	if err != nil {
+		return fmt.Errorf("auth required: %w", err)
+	}
+
+	api := slack.NewAPI(client)
+
+	// Resolve channel
+	channelID, err := api.ResolveChannel(channel)
+	if err != nil {
+		return fmt.Errorf("resolve channel: %w", err)
+	}
+
+	if err := api.DeleteMessage(channelID, timestamp); err != nil {
+		return err
+	}
+
+	output.Success(fmt.Sprintf("Deleted message %s", timestamp))
+	return nil
+}
+
+func runMessagesPermalink(cmd *cobra.Command, args []string) error {
+	channel := args[0]
+	timestamp := args[1]
+
+	cfg := config.Get()
+	client, err := auth.GetClient(cfg)
+	if err != nil {
+		return fmt.Errorf("auth required: %w", err)
+	}
+
+	api := slack.NewAPI(client)
+
+	// Resolve channel
+	channelID, err := api.ResolveChannel(channel)
+	if err != nil {
+		return fmt.Errorf("resolve channel: %w", err)
+	}
+
+	permalink, err := api.GetPermalink(channelID, timestamp)
+	if err != nil {
+		return err
+	}
+
+	output.Print(map[string]string{"permalink": permalink})
 	return nil
 }
