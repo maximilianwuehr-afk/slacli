@@ -11,12 +11,13 @@ import (
 
 // Config holds the application configuration
 type Config struct {
-	StoreDir         string `json:"store_dir"`
-	DefaultWorkspace string `json:"default_workspace,omitempty"`
-	SyncDays         int    `json:"sync_days"`
-	RetentionDays    int    `json:"retention_days"`
-	AutoPrune        bool   `json:"auto_prune"`
-	VacuumAfterPrune bool   `json:"vacuum_after_prune"`
+	StoreDir          string   `json:"store_dir"`
+	DefaultWorkspace  string   `json:"default_workspace,omitempty"`
+	SyncDays          int      `json:"sync_days"`
+	RetentionDays     int      `json:"retention_days"`
+	AutoPrune         bool     `json:"auto_prune"`
+	VacuumAfterPrune  bool     `json:"vacuum_after_prune"`
+	WhitelistChannels []string `json:"whitelist_channels,omitempty"` // Channels to always sync (names or IDs)
 }
 
 var cfg *Config
@@ -122,4 +123,41 @@ func (c *Config) DatabasePath() string {
 // SyncStatePath returns the path to sync state file
 func (c *Config) SyncStatePath() string {
 	return filepath.Join(c.StoreDir, "sync_state.json")
+}
+
+// XoxcCredentialsPath returns the path to xoxc credentials file
+func (c *Config) XoxcCredentialsPath() string {
+	return filepath.Join(c.StoreDir, "xoxc_credentials.json")
+}
+
+// AddWhitelistChannel adds a channel to the whitelist
+func (c *Config) AddWhitelistChannel(channel string) bool {
+	for _, ch := range c.WhitelistChannels {
+		if ch == channel {
+			return false // Already exists
+		}
+	}
+	c.WhitelistChannels = append(c.WhitelistChannels, channel)
+	return true
+}
+
+// RemoveWhitelistChannel removes a channel from the whitelist
+func (c *Config) RemoveWhitelistChannel(channel string) bool {
+	for i, ch := range c.WhitelistChannels {
+		if ch == channel {
+			c.WhitelistChannels = append(c.WhitelistChannels[:i], c.WhitelistChannels[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// IsWhitelisted checks if a channel is in the whitelist
+func (c *Config) IsWhitelisted(channelID, channelName string) bool {
+	for _, ch := range c.WhitelistChannels {
+		if ch == channelID || ch == channelName || ch == "#"+channelName {
+			return true
+		}
+	}
+	return false
 }

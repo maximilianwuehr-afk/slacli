@@ -10,6 +10,7 @@ type Channel struct {
 	LastMessageAt string   `json:"last_message_at,omitempty"`
 	LastSentAt    string   `json:"last_sent_at,omitempty"`
 	LastMentionAt string   `json:"last_mention_at,omitempty"`
+	LastActivity  string   `json:"last_activity,omitempty"` // Slack API's updated timestamp
 	UnreadCount   int      `json:"unread_count"`
 	Members       []string `json:"members,omitempty"`
 }
@@ -75,6 +76,7 @@ type Draft struct {
 // DraftListResult is the output for drafts list command
 type DraftListResult struct {
 	Drafts []Draft `json:"drafts"`
+	Source string  `json:"source,omitempty"` // "xoxc" or "scheduled"
 }
 
 // DBStats represents database statistics

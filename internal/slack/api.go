@@ -91,6 +91,31 @@ type AuthInfo struct {
 	TeamName string
 }
 
+// GetChannelInfo fetches info for a single channel by ID
+func (a *API) GetChannelInfo(channelID string) (*ChannelInfo, error) {
+	params := url.Values{
+		"channel": {channelID},
+	}
+
+	resp, err := a.get("conversations.info", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK      bool        `json:"ok"`
+		Error   string      `json:"error,omitempty"`
+		Channel ChannelInfo `json:"channel"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("conversations.info: %s", result.Error)
+	}
+	return &result.Channel, nil
+}
+
 // ListChannels returns all channels
 func (a *API) ListChannels(cursor string) (*ChannelsResponse, error) {
 	params := url.Values{
@@ -125,19 +150,28 @@ type ChannelsResponse struct {
 	ResponseMetadata ResponseMetadata `json:"response_metadata"`
 }
 
+// ChannelLatest represents the latest message in a channel
+type ChannelLatest struct {
+	TS string `json:"ts"`
+}
+
 // ChannelInfo is a channel from the API
 type ChannelInfo struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	IsChannel      bool     `json:"is_channel"`
-	IsGroup        bool     `json:"is_group"`
-	IsIM           bool     `json:"is_im"`
-	IsMPIM         bool     `json:"is_mpim"`
-	IsPrivate      bool     `json:"is_private"`
-	IsArchived     bool     `json:"is_archived"`
-	User           string   `json:"user,omitempty"` // For DMs
-	NumMembers     int      `json:"num_members"`
-	UnreadCount    int      `json:"unread_count,omitempty"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	IsChannel      bool          `json:"is_channel"`
+	IsGroup        bool          `json:"is_group"`
+	IsIM           bool          `json:"is_im"`
+	IsMPIM         bool          `json:"is_mpim"`
+	IsPrivate      bool          `json:"is_private"`
+	IsArchived     bool          `json:"is_archived"`
+	User           string        `json:"user,omitempty"` // For DMs
+	NumMembers     int           `json:"num_members"`
+	UnreadCount    int           `json:"unread_count,omitempty"`
+	UnreadCountDisplay int       `json:"unread_count_display,omitempty"`
+	LastRead       string        `json:"last_read,omitempty"` // Timestamp of last read message
+	Updated        float64       `json:"updated,omitempty"`   // Unix timestamp of last message
+	Latest         ChannelLatest `json:"latest,omitempty"`    // Latest message (for skip-unchanged)
 }
 
 // GetChannelType returns the channel type string
@@ -236,6 +270,41 @@ func (a *API) GetHistory(channelID, cursor string, limit int, oldest, latest str
 
 // HistoryResponse is the response from conversations.history
 type HistoryResponse struct {
+	OK               bool             `json:"ok"`
+	Error            string           `json:"error,omitempty"`
+	Messages         []MessageInfo    `json:"messages"`
+	HasMore          bool             `json:"has_more"`
+	ResponseMetadata ResponseMetadata `json:"response_metadata"`
+}
+
+// GetReplies returns all replies in a thread
+func (a *API) GetReplies(channelID, threadTS string, cursor string, limit int) (*RepliesResponse, error) {
+	params := url.Values{
+		"channel": {channelID},
+		"ts":      {threadTS},
+		"limit":   {strconv.Itoa(limit)},
+	}
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+
+	resp, err := a.get("conversations.replies", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result RepliesResponse
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("conversations.replies: %s", result.Error)
+	}
+	return &result, nil
+}
+
+// RepliesResponse is the response from conversations.replies
+type RepliesResponse struct {
 	OK               bool             `json:"ok"`
 	Error            string           `json:"error,omitempty"`
 	Messages         []MessageInfo    `json:"messages"`
@@ -392,6 +461,123 @@ func (a *API) SendMessage(channelID, text, threadTS string) (output.SendResult, 
 		Timestamp: result.TS,
 		MessageID: result.TS,
 	}, nil
+}
+
+// ScheduledMessage represents a scheduled message
+type ScheduledMessage struct {
+	ID          string `json:"id"`
+	ChannelID   string `json:"channel_id"`
+	Text        string `json:"text"`
+	PostAt      int64  `json:"post_at"`
+	DateCreated int64  `json:"date_created"`
+}
+
+// ScheduleMessage schedules a message for future delivery
+func (a *API) ScheduleMessage(channelID, text string, postAt int64, threadTS string) (*ScheduledMessage, error) {
+	payload := map[string]interface{}{
+		"channel": channelID,
+		"text":    text,
+		"post_at": postAt,
+	}
+	if threadTS != "" {
+		payload["thread_ts"] = threadTS
+	}
+
+	resp, err := a.post("chat.scheduleMessage", payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK               bool   `json:"ok"`
+		Error            string `json:"error,omitempty"`
+		ScheduledMsgID   string `json:"scheduled_message_id"`
+		Channel          string `json:"channel"`
+		PostAt           int64  `json:"post_at"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("chat.scheduleMessage: %s", result.Error)
+	}
+
+	return &ScheduledMessage{
+		ID:        result.ScheduledMsgID,
+		ChannelID: result.Channel,
+		Text:      text,
+		PostAt:    result.PostAt,
+	}, nil
+}
+
+// ListScheduledMessages lists scheduled messages for a channel
+func (a *API) ListScheduledMessages(channelID string) ([]ScheduledMessage, error) {
+	params := url.Values{}
+	if channelID != "" {
+		params.Set("channel", channelID)
+	}
+
+	resp, err := a.get("chat.scheduledMessages.list", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK       bool `json:"ok"`
+		Error    string `json:"error,omitempty"`
+		Messages []struct {
+			ID          string `json:"id"`
+			ChannelID   string `json:"channel_id"`
+			Text        string `json:"text"`
+			PostAt      int64  `json:"post_at"`
+			DateCreated int64  `json:"date_created"`
+		} `json:"scheduled_messages"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("chat.scheduledMessages.list: %s", result.Error)
+	}
+
+	messages := make([]ScheduledMessage, len(result.Messages))
+	for i, m := range result.Messages {
+		messages[i] = ScheduledMessage{
+			ID:          m.ID,
+			ChannelID:   m.ChannelID,
+			Text:        m.Text,
+			PostAt:      m.PostAt,
+			DateCreated: m.DateCreated,
+		}
+	}
+
+	return messages, nil
+}
+
+// DeleteScheduledMessage deletes a scheduled message
+func (a *API) DeleteScheduledMessage(channelID, scheduledMsgID string) error {
+	payload := map[string]interface{}{
+		"channel":              channelID,
+		"scheduled_message_id": scheduledMsgID,
+	}
+
+	resp, err := a.post("chat.deleteScheduledMessage", payload)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("chat.deleteScheduledMessage: %s", result.Error)
+	}
+
+	return nil
 }
 
 // UploadFile uploads a file to a channel
@@ -637,6 +823,163 @@ func (a *API) SendDraft(draftID string) (output.SendResult, error) {
 	}, nil
 }
 
+// SearchMessages searches for messages matching a query
+func (a *API) SearchMessages(query string, count, page int) (*SearchResponse, error) {
+	params := url.Values{
+		"query": {query},
+		"count": {strconv.Itoa(count)},
+		"page":  {strconv.Itoa(page)},
+		"sort":  {"timestamp"},
+	}
+
+	resp, err := a.get("search.messages", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result SearchResponse
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("search.messages: %s", result.Error)
+	}
+	return &result, nil
+}
+
+// SearchResponse is the response from search.messages
+type SearchResponse struct {
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
+	Messages struct {
+		Total      int           `json:"total"`
+		Matches    []SearchMatch `json:"matches"`
+		Pagination struct {
+			TotalCount int `json:"total_count"`
+			Page       int `json:"page"`
+			PerPage    int `json:"per_page"`
+			PageCount  int `json:"page_count"`
+		} `json:"pagination"`
+	} `json:"messages"`
+}
+
+// SearchMatch is a single search result
+type SearchMatch struct {
+	Channel struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"channel"`
+	User      string `json:"user"`
+	Text      string `json:"text"`
+	TS        string `json:"ts"`
+	Permalink string `json:"permalink"`
+}
+
+// GetChannelsWithUnread returns channels that have unread messages
+// Uses conversations.list and filters by unread_count > 0
+func (a *API) GetChannelsWithUnread() ([]ChannelInfo, error) {
+	var unreadChannels []ChannelInfo
+	cursor := ""
+
+	for {
+		params := url.Values{
+			"types":            {"public_channel,private_channel,mpim,im"},
+			"exclude_archived": {"true"},
+			"limit":            {"200"},
+		}
+		if cursor != "" {
+			params.Set("cursor", cursor)
+		}
+
+		resp, err := a.get("conversations.list", params)
+		if err != nil {
+			return nil, err
+		}
+
+		var result ChannelsResponse
+		if err := json.Unmarshal(resp, &result); err != nil {
+			return nil, err
+		}
+		if !result.OK {
+			return nil, fmt.Errorf("conversations.list: %s", result.Error)
+		}
+
+		// conversations.list doesn't return unread_count, need to get via conversations.info
+		// Collect channel IDs and fetch info in parallel
+		for _, ch := range result.Channels {
+			if ch.IsArchived {
+				continue
+			}
+			// Get detailed info including unread count
+			info, err := a.GetChannelInfo(ch.ID)
+			if err != nil {
+				output.Debug("Failed to get info for %s: %v", ch.ID, err)
+				continue
+			}
+			if info.UnreadCountDisplay > 0 || info.UnreadCount > 0 {
+				unreadChannels = append(unreadChannels, *info)
+			}
+		}
+
+		cursor = result.ResponseMetadata.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+
+	return unreadChannels, nil
+}
+
+// UnreadChannelInfo contains channel info with unread details
+type UnreadChannelInfo struct {
+	ChannelInfo
+	UnreadMessages []MessageInfo
+}
+
+// GetMyChannelIDs returns channel IDs where the user has posted messages
+// Uses search API with "from:<@userID>" query, paginating through all results
+func (a *API) GetMyChannelIDs(days int) ([]string, error) {
+	// Get current user ID
+	authInfo, err := a.GetAuthInfo()
+	if err != nil {
+		return nil, fmt.Errorf("get auth info: %w", err)
+	}
+
+	// Build search query for messages from current user
+	cutoff := time.Now().AddDate(0, 0, -days)
+	dateStr := cutoff.Format("2006-01-02")
+	query := fmt.Sprintf("from:<@%s> after:%s", authInfo.UserID, dateStr)
+
+	// Extract unique channel IDs across all pages
+	channelSet := make(map[string]bool)
+	page := 1
+	maxPages := 20 // Safety limit
+
+	for page <= maxPages {
+		result, err := a.SearchMessages(query, 100, page)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, match := range result.Messages.Matches {
+			channelSet[match.Channel.ID] = true
+		}
+
+		// Check if more pages
+		if page >= result.Messages.Pagination.PageCount || len(result.Messages.Matches) == 0 {
+			break
+		}
+		page++
+	}
+
+	channels := make([]string, 0, len(channelSet))
+	for id := range channelSet {
+		channels = append(channels, id)
+	}
+
+	return channels, nil
+}
+
 // HTTP helpers
 
 func (a *API) get(method string, params url.Values) ([]byte, error) {
@@ -710,7 +1053,7 @@ type rateLimiter struct {
 
 func newRateLimiter() *rateLimiter {
 	return &rateLimiter{
-		minDelay: 100 * time.Millisecond, // ~10 requests/second
+		minDelay: 0, // Rely on Slack's 429 response + retry for rate limiting
 	}
 }
 

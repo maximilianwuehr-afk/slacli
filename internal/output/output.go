@@ -293,6 +293,18 @@ func Success(msg string) {
 	}
 }
 
+// Warn prints a warning message
+func Warn(msg string) {
+	if opts.Quiet {
+		return
+	}
+	if !opts.NoColor && IsTTY() {
+		fmt.Fprintf(os.Stderr, "\033[33m⚠\033[0m %s\n", msg)
+	} else {
+		fmt.Fprintf(os.Stderr, "⚠ %s\n", msg)
+	}
+}
+
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s

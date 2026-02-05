@@ -61,6 +61,8 @@ func (s *Store) migrate() error {
 		last_message_ts TEXT,
 		last_sent_ts TEXT,
 		last_mention_ts TEXT,
+		last_activity TEXT,
+		last_read TEXT,
 		unread_count INTEGER DEFAULT 0,
 		members TEXT,
 		created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -140,7 +142,20 @@ func (s *Store) migrate() error {
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Run migrations (ignore errors for columns that already exist)
+	migrations := []string{
+		"ALTER TABLE channels ADD COLUMN last_activity TEXT",
+		"ALTER TABLE channels ADD COLUMN last_read TEXT",
+	}
+	for _, m := range migrations {
+		s.db.Exec(m) // Ignore errors - column may already exist
+	}
+
+	return nil
 }
 
 // ChannelListOptions for listing channels
@@ -155,7 +170,8 @@ type ChannelListOptions struct {
 func (s *Store) ListChannels(opts ChannelListOptions) ([]output.Channel, error) {
 	query := `SELECT id, name, type, is_private, is_archived,
 		COALESCE(last_message_ts, ''), COALESCE(last_sent_ts, ''),
-		COALESCE(last_mention_ts, ''), unread_count, COALESCE(members, '[]')
+		COALESCE(last_mention_ts, ''), COALESCE(last_activity, ''),
+		unread_count, COALESCE(members, '[]')
 		FROM channels WHERE 1=1`
 
 	args := []interface{}{}
@@ -196,7 +212,8 @@ func (s *Store) ListChannels(opts ChannelListOptions) ([]output.Channel, error) 
 		var ch output.Channel
 		var membersJSON string
 		err := rows.Scan(&ch.ID, &ch.Name, &ch.Type, &ch.IsPrivate, &ch.IsArchived,
-			&ch.LastMessageAt, &ch.LastSentAt, &ch.LastMentionAt, &ch.UnreadCount, &membersJSON)
+			&ch.LastMessageAt, &ch.LastSentAt, &ch.LastMentionAt, &ch.LastActivity,
+			&ch.UnreadCount, &membersJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -258,6 +275,75 @@ func (s *Store) ListMessages(opts MessageListOptions) ([]output.Message, error) 
 	}
 
 	return s.queryMessages(query, args...)
+}
+
+// GetUnreadMessages returns unread messages across all channels
+// Messages are considered unread if timestamp > last_read for that channel
+func (s *Store) GetUnreadMessages(limit int) ([]output.Message, error) {
+	query := `SELECT m.id, m.channel_id, COALESCE(c.name, ''), COALESCE(m.author_id, ''),
+		COALESCE(m.author_email, ''), COALESCE(m.author_name, ''),
+		COALESCE(m.text, ''), m.timestamp, COALESCE(m.thread_ts, ''),
+		m.reply_count, COALESCE(m.reactions, '[]'), m.edited
+		FROM messages m
+		LEFT JOIN channels c ON m.channel_id = c.id
+		WHERE c.last_read IS NOT NULL AND c.last_read != '' AND m.timestamp > c.last_read
+		ORDER BY m.timestamp DESC`
+
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	return s.queryMessages(query)
+}
+
+// GetChannelsWithUnread returns channels that have unread messages
+func (s *Store) GetChannelsWithUnread() ([]output.Channel, error) {
+	query := `SELECT id, name, type, is_private, is_archived,
+		COALESCE(last_message_ts, ''), COALESCE(last_sent_ts, ''),
+		COALESCE(last_mention_ts, ''), COALESCE(last_activity, ''),
+		unread_count, COALESCE(members, '[]'),
+		(SELECT COUNT(*) FROM messages m WHERE m.channel_id = channels.id
+		 AND channels.last_read IS NOT NULL AND channels.last_read != ''
+		 AND m.timestamp > channels.last_read) as computed_unread
+		FROM channels
+		WHERE unread_count > 0 OR computed_unread > 0
+		ORDER BY last_message_ts DESC NULLS LAST`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []output.Channel
+	for rows.Next() {
+		var ch output.Channel
+		var membersJSON string
+		var computedUnread int
+		err := rows.Scan(&ch.ID, &ch.Name, &ch.Type, &ch.IsPrivate, &ch.IsArchived,
+			&ch.LastMessageAt, &ch.LastSentAt, &ch.LastMentionAt, &ch.LastActivity,
+			&ch.UnreadCount, &membersJSON, &computedUnread)
+		if err != nil {
+			return nil, err
+		}
+		if membersJSON != "" {
+			json.Unmarshal([]byte(membersJSON), &ch.Members)
+		}
+		// Use computed unread if API unread is 0
+		if ch.UnreadCount == 0 && computedUnread > 0 {
+			ch.UnreadCount = computedUnread
+		}
+		channels = append(channels, ch)
+	}
+
+	return channels, rows.Err()
+}
+
+// UpdateChannelLastRead updates the last_read timestamp for a channel
+func (s *Store) UpdateChannelLastRead(channelID, lastRead string) error {
+	_, err := s.db.Exec(`UPDATE channels SET last_read = ?, updated_at = ? WHERE id = ?`,
+		lastRead, time.Now().Format(time.RFC3339), channelID)
+	return err
 }
 
 // SearchOptions for searching messages
@@ -667,6 +753,13 @@ type SyncState struct {
 	LastMessageTS   map[string]string `json:"last_message_ts"`
 	UserID          string            `json:"user_id"`
 	TeamID          string            `json:"team_id"`
+	// Cached channel IDs from --my-channels search
+	CachedChannelIDs   []string `json:"cached_channel_ids,omitempty"`
+	CachedChannelsTime string   `json:"cached_channels_time,omitempty"`
+	// Channel latest timestamps for skip-unchanged optimization
+	ChannelLatestTS map[string]string `json:"channel_latest_ts,omitempty"`
+	// Track when each channel was last synced (for skip-recently-synced)
+	ChannelLastSynced map[string]string `json:"channel_last_synced,omitempty"`
 }
 
 // LoadSyncState loads sync state from file

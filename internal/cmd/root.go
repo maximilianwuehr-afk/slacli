@@ -90,6 +90,7 @@ func init() {
 	rootCmd.AddCommand(usersCmd)
 	rootCmd.AddCommand(dbCmd)
 	rootCmd.AddCommand(doctorCmd)
+	rootCmd.AddCommand(configCmd)
 }
 
 func initConfig() {

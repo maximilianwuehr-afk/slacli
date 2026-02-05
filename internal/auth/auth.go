@@ -2,10 +2,16 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -65,15 +71,27 @@ func Login(cfg *config.Config) error {
 		return fmt.Errorf("generate state: %w", err)
 	}
 
-	// Start local server to receive callback
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Start local HTTPS server to receive callback (fixed port for Slack OAuth config)
+	const callbackPort = 49251
+
+	// Generate self-signed cert for localhost
+	tlsCert, err := generateSelfSignedCert()
 	if err != nil {
-		return fmt.Errorf("start callback server: %w", err)
+		return fmt.Errorf("generate TLS cert: %w", err)
 	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+	}
+
+	tcpListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", callbackPort))
+	if err != nil {
+		return fmt.Errorf("start callback server on port %d: %w", callbackPort, err)
+	}
+	listener := tls.NewListener(tcpListener, tlsConfig)
 	defer listener.Close()
 
-	port := listener.Addr().(*net.TCPAddr).Port
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	redirectURI := fmt.Sprintf("https://127.0.0.1:%d/callback", callbackPort)
 
 	// Build authorization URL
 	// Note: For personal use, you'll need to create a Slack app and get client credentials
@@ -378,4 +396,40 @@ func openBrowser(url string) error {
 		return fmt.Errorf("unsupported platform")
 	}
 	return cmd.Start()
+}
+
+// generateSelfSignedCert creates a self-signed TLS certificate for localhost
+func generateSelfSignedCert() (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"slacli"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  priv,
+	}, nil
 }

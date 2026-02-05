@@ -1,10 +1,14 @@
 # Binaries
 /slacli
 /slacli.exe
+/slack
 *.exe
 *.dll
 *.so
 *.dylib
+
+# Claude/AI
+.claude/
 
 # Test binary
 *.test
