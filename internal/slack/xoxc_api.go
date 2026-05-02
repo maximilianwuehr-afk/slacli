@@ -159,7 +159,7 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 	// Generate UUID for client_msg_id
 	clientMsgID := generateUUID()
 
-	destination, isFromComposer, err := a.draftDestination(channelID, threadTS)
+	destination, err := a.draftDestination(channelID, threadTS)
 	if err != nil {
 		return "", err
 	}
@@ -188,8 +188,8 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 		"blocks":           blocks,
 		"attachments":      "",
 		"file_ids":         []string{},
-		"is_from_composer": isFromComposer,
-		"_x_reason":        draftUpdateReason(isFromComposer),
+		"is_from_composer": false,
+		"_x_reason":        "MessageInput:updateDraft",
 	}
 
 	// If updating existing draft, add draft_id
@@ -234,37 +234,30 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 	return result.Draft.ID, nil
 }
 
-func (a *XoxcAPI) draftDestination(channelID, threadTS string) (map[string]interface{}, bool, error) {
+func (a *XoxcAPI) draftDestination(channelID, threadTS string) (map[string]interface{}, error) {
 	if threadTS != "" {
 		return map[string]interface{}{
 			"channel_id": channelID,
 			"thread_ts":  threadTS,
-		}, false, nil
+		}, nil
 	}
 
 	if strings.HasPrefix(channelID, "D") {
 		info, err := a.ConversationInfo(channelID)
 		if err != nil {
-			return nil, false, fmt.Errorf("lookup DM user: %w", err)
+			return nil, fmt.Errorf("lookup DM user: %w", err)
 		}
 		if info.User == "" {
-			return nil, false, fmt.Errorf("lookup DM user: conversation %s has no user", channelID)
+			return nil, fmt.Errorf("lookup DM user: conversation %s has no user", channelID)
 		}
 		return map[string]interface{}{
 			"user_ids": []string{info.User},
-		}, true, nil
+		}, nil
 	}
 
 	return map[string]interface{}{
 		"channel_id": channelID,
-	}, true, nil
-}
-
-func draftUpdateReason(isFromComposer bool) string {
-	if isFromComposer {
-		return "ComposerPage:update"
-	}
-	return "MessageInput:updateDraft"
+	}, nil
 }
 
 func encodePayloadValues(payload map[string]interface{}) (url.Values, error) {
