@@ -71,7 +71,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			dbCheck.Message = fmt.Sprintf("%d channels, %d messages, %d users (%.1f MB)",
 				stats.ChannelCount, stats.MessageCount, stats.UserCount, float64(stats.SizeBytes)/(1024*1024))
 		}
-		store.Close()
+		_ = store.Close()
 	}
 	checks = append(checks, dbCheck)
 

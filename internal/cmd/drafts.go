@@ -132,7 +132,7 @@ func init() {
 	draftsCreateCmd.Flags().StringVar(&draftsCreateChannel, "channel", "", "target channel/DM (required)")
 	draftsCreateCmd.Flags().StringVar(&draftsCreateText, "text", "", "draft text (or read from stdin)")
 	draftsCreateCmd.Flags().StringVar(&draftsCreateThread, "thread", "", "reply to thread")
-	draftsCreateCmd.MarkFlagRequired("channel")
+	cobra.CheckErr(draftsCreateCmd.MarkFlagRequired("channel"))
 
 	// Edit flags
 	draftsEditCmd.Flags().StringVar(&draftsEditText, "text", "", "new text for draft")
@@ -204,7 +204,7 @@ func runDraftsSetup(cmd *cobra.Command, args []string) error {
 	info, err := api.TestAuth()
 	if err != nil {
 		// Remove invalid credentials
-		os.Remove(cfg.XoxcCredentialsPath())
+		_ = os.Remove(cfg.XoxcCredentialsPath())
 		return fmt.Errorf("credentials invalid: %w", err)
 	}
 
@@ -328,17 +328,9 @@ func runDraftsListScheduled() error {
 func runDraftsCreate(cmd *cobra.Command, args []string) error {
 	cfg := config.Get()
 
-	text := draftsCreateText
-	if text == "" {
-		var lines []string
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			lines = append(lines, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("read stdin: %w", err)
-		}
-		text = strings.Join(lines, "\n")
+	text, err := readDraftText(draftsCreateText, true)
+	if err != nil {
+		return err
 	}
 
 	if text == "" {
@@ -350,31 +342,94 @@ func runDraftsCreate(cmd *cobra.Command, args []string) error {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
 			api := slack.NewXoxcAPI(client, creds.Workspace)
-			
-			channelID, err := api.ResolveChannel(draftsCreateChannel)
+			draft, updated, err := saveNativeDraft(api, draftsCreateChannel, text, draftsCreateThread)
 			if err != nil {
-				return fmt.Errorf("resolve channel: %w", err)
+				return err
 			}
-
-			draftID, err := api.SaveDraft(channelID, text, draftsCreateThread, "")
-			if err == nil {
-				draft := output.Draft{
-					ID:        draftID,
-					ChannelID: channelID,
-					Text:      text,
-					ThreadTS:  draftsCreateThread,
-					CreatedAt: time.Now().Format(time.RFC3339),
-				}
-				output.Print(draft)
-				output.Success(fmt.Sprintf("Draft created! ID: %s (synced to Slack)", draftID))
-				return nil
+			output.Print(draft)
+			if updated {
+				output.Success(fmt.Sprintf("Draft updated! ID: %s (synced to Slack)", draft.ID))
+			} else {
+				output.Success(fmt.Sprintf("Draft created! ID: %s (synced to Slack)", draft.ID))
 			}
-			output.Debug("xoxc drafts.set failed: %v, falling back to scheduled messages", err)
+			return nil
 		}
 	}
 
 	// Fallback to scheduled messages
 	return runDraftsCreateScheduled(text)
+}
+
+func readDraftText(flagText string, readStdinWhenEmpty bool) (string, error) {
+	if flagText != "" {
+		return flagText, nil
+	}
+	if !readStdinWhenEmpty {
+		return "", nil
+	}
+
+	var lines []string
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func saveNativeDraft(api *slack.XoxcAPI, channel, text, threadTS string) (output.Draft, bool, error) {
+	channelID, err := api.ResolveChannel(channel)
+	if err != nil {
+		return output.Draft{}, false, fmt.Errorf("resolve channel: %w", err)
+	}
+
+	draftID, err := api.SaveDraft(channelID, text, threadTS, "")
+	if err != nil {
+		if !strings.Contains(err.Error(), "attached_draft_exists") {
+			return output.Draft{}, false, fmt.Errorf("create draft: %w", err)
+		}
+
+		existing, findErr := findNativeDraft(api, channelID, threadTS)
+		if findErr != nil {
+			return output.Draft{}, false, fmt.Errorf("create draft: %w", err)
+		}
+		draftID, err = api.SaveDraft(channelID, text, threadTS, existing.ID)
+		if err != nil {
+			return output.Draft{}, false, fmt.Errorf("update existing draft: %w", err)
+		}
+		return output.Draft{
+			ID:        draftID,
+			ChannelID: channelID,
+			Text:      text,
+			ThreadTS:  threadTS,
+			CreatedAt: existing.CreatedAt,
+			UpdatedAt: time.Now().Format(time.RFC3339),
+		}, true, nil
+	}
+
+	return output.Draft{
+		ID:        draftID,
+		ChannelID: channelID,
+		Text:      text,
+		ThreadTS:  threadTS,
+		CreatedAt: time.Now().Format(time.RFC3339),
+		UpdatedAt: time.Now().Format(time.RFC3339),
+	}, false, nil
+}
+
+func findNativeDraft(api *slack.XoxcAPI, channelID, threadTS string) (output.Draft, error) {
+	drafts, err := api.ListDrafts()
+	if err != nil {
+		return output.Draft{}, fmt.Errorf("list drafts: %w", err)
+	}
+	for _, d := range drafts {
+		if d.ChannelID == channelID && d.ThreadTS == threadTS {
+			return d, nil
+		}
+	}
+	return output.Draft{}, fmt.Errorf("existing draft not found for channel %s", channelID)
 }
 
 func runDraftsCreateScheduled(text string) error {
@@ -520,7 +575,9 @@ func runDraftsDelete(cmd *cobra.Command, args []string) error {
 	if !draftsDeleteForce {
 		fmt.Fprintf(os.Stderr, "Delete draft %s? [y/N] ", draftID)
 		var response string
-		fmt.Scanln(&response)
+		if _, err := fmt.Scanln(&response); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
 		if response != "y" && response != "Y" {
 			return fmt.Errorf("cancelled")
 		}
@@ -609,7 +666,7 @@ func runDraftsSend(cmd *cobra.Command, args []string) error {
 						if err != nil {
 							return fmt.Errorf("oauth auth required to send: %w", err)
 						}
-						
+
 						oauthAPI := slack.NewAPI(oauthClient)
 						result, err := oauthAPI.SendMessage(d.ChannelID, d.Text, d.ThreadTS)
 						if err != nil {

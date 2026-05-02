@@ -44,7 +44,7 @@ func runChannelsList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	opts := db.ChannelListOptions{
 		SortBy: channelsSortBy,

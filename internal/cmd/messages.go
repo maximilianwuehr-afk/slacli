@@ -131,7 +131,7 @@ func init() {
 	messagesListCmd.Flags().StringVar(&msgListBefore, "before", "", "messages before timestamp")
 	messagesListCmd.Flags().StringVar(&msgListAfter, "after", "", "messages after timestamp")
 	messagesListCmd.Flags().StringVar(&msgListThread, "thread", "", "show thread replies for message")
-	messagesListCmd.MarkFlagRequired("channel")
+	cobra.CheckErr(messagesListCmd.MarkFlagRequired("channel"))
 
 	// Search flags
 	messagesSearchCmd.Flags().StringVar(&msgSearchChannel, "channel", "", "scope to channel/DM")
@@ -156,7 +156,7 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	opts := db.MessageListOptions{
 		Channel:  msgListChannel,
@@ -189,7 +189,7 @@ func runMessagesSearch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	opts := db.SearchOptions{
 		Query:   query,
@@ -264,7 +264,7 @@ func runMessagesContext(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	messages, err := store.GetMessageContext(messageID, msgContextBefore, msgContextAfter)
 	if err != nil {
@@ -290,7 +290,7 @@ func runMessagesUnread(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	messages, err := store.GetUnreadMessages(msgUnreadLimit)
 	if err != nil {
