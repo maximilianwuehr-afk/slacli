@@ -59,7 +59,7 @@ func runDraft(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("draft text required (pass text or use --stdin)")
 	}
 
-	api := slack.NewXoxcAPI(client, creds.Workspace)
+	api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 	draft, updated, err := saveNativeDraft(api, args[0], text, draftThread)
 	if err != nil {
 		return err

@@ -200,7 +200,7 @@ func runDraftsSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create client: %w", err)
 	}
 
-	api := slack.NewXoxcAPI(client, workspace)
+	api := slack.NewXoxcAPI(client, workspace, token)
 	info, err := api.TestAuth()
 	if err != nil {
 		// Remove invalid credentials
@@ -234,7 +234,7 @@ func runDraftsStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create client: %w", err)
 	}
 
-	api := slack.NewXoxcAPI(client, creds.Workspace)
+	api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 	info, err := api.TestAuth()
 	if err != nil {
 		output.Warn("xoxc credentials expired or invalid")
@@ -259,7 +259,7 @@ func runDraftsList(cmd *cobra.Command, args []string) error {
 	if auth.HasXoxcCredentials(cfg) {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
-			api := slack.NewXoxcAPI(client, creds.Workspace)
+			api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 			drafts, err := api.ListDrafts()
 			if err == nil {
 				// Filter by channel if specified
@@ -341,7 +341,7 @@ func runDraftsCreate(cmd *cobra.Command, args []string) error {
 	if auth.HasXoxcCredentials(cfg) {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
-			api := slack.NewXoxcAPI(client, creds.Workspace)
+			api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 			draft, updated, err := saveNativeDraft(api, draftsCreateChannel, text, draftsCreateThread)
 			if err != nil {
 				return err
@@ -477,7 +477,7 @@ func runDraftsShow(cmd *cobra.Command, args []string) error {
 	if auth.HasXoxcCredentials(cfg) {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
-			api := slack.NewXoxcAPI(client, creds.Workspace)
+			api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 			drafts, err := api.ListDrafts()
 			if err == nil {
 				for _, d := range drafts {
@@ -545,7 +545,7 @@ func runDraftsEdit(cmd *cobra.Command, args []string) error {
 	if auth.HasXoxcCredentials(cfg) {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
-			api := slack.NewXoxcAPI(client, creds.Workspace)
+			api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 			drafts, err := api.ListDrafts()
 			if err == nil {
 				for _, d := range drafts {
@@ -587,7 +587,7 @@ func runDraftsDelete(cmd *cobra.Command, args []string) error {
 	if auth.HasXoxcCredentials(cfg) {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
-			api := slack.NewXoxcAPI(client, creds.Workspace)
+			api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 			// Need to find draft to get channelID
 			drafts, err := api.ListDrafts()
 			if err == nil {
@@ -656,7 +656,7 @@ func runDraftsSend(cmd *cobra.Command, args []string) error {
 	if auth.HasXoxcCredentials(cfg) {
 		client, creds, err := auth.GetXoxcClient(cfg)
 		if err == nil {
-			api := slack.NewXoxcAPI(client, creds.Workspace)
+			api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
 			drafts, err := api.ListDrafts()
 			if err == nil {
 				for _, d := range drafts {

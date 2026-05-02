@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,14 +21,20 @@ type XoxcAPI struct {
 	client      *http.Client
 	rateLimiter *rateLimiter
 	workspace   string // Workspace subdomain for edge API
+	token       string
 }
 
 // NewXoxcAPI creates a new xoxc-based API client
-func NewXoxcAPI(client *http.Client, workspace string) *XoxcAPI {
+func NewXoxcAPI(client *http.Client, workspace string, token ...string) *XoxcAPI {
+	var tokenValue string
+	if len(token) > 0 {
+		tokenValue = token[0]
+	}
 	return &XoxcAPI{
 		client:      client,
 		rateLimiter: newRateLimiter(),
 		workspace:   workspace,
+		token:       tokenValue,
 	}
 }
 
@@ -47,7 +54,9 @@ type Draft struct {
 func (a *XoxcAPI) ListDrafts() ([]output.Draft, error) {
 	// Use the edge API endpoint for drafts
 	params := url.Values{
-		"include_channel_names": {"true"},
+		"is_active": {"true"},
+		"limit":     {"1000"},
+		"_x_reason": {"client-v2-boot-team"},
 	}
 
 	resp, err := a.post("drafts.list", params)
@@ -180,8 +189,10 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 		"client_msg_id":    clientMsgID,
 		"destinations":     []map[string]interface{}{destination},
 		"blocks":           blocks,
+		"attachments":      "",
 		"file_ids":         []string{},
 		"is_from_composer": false,
+		"_x_reason":        "MessageInput:updateDraft",
 	}
 
 	// If updating existing draft, add draft_id
@@ -202,7 +213,7 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 		return "", err
 	}
 
-	resp, err := a.post("drafts.create", params)
+	resp, err := a.postMultipart("drafts.create", params, a.draftQueryParams())
 	if err != nil {
 		return "", fmt.Errorf("drafts.create: %w", err)
 	}
@@ -259,12 +270,13 @@ func generateUUID() string {
 func (a *XoxcAPI) DeleteDraft(channelID, draftID string) error {
 	// Use a far-future timestamp to force the delete
 	// This bypasses Slack's optimistic concurrency control
-	payload := map[string]interface{}{
-		"draft_id":               draftID,
-		"client_last_updated_ts": "9999999999.999999",
+	payload := url.Values{
+		"draft_id":               {draftID},
+		"client_last_updated_ts": {"9999999999.999999"},
+		"_x_reason":              {"MessageInput:deleteDraft"},
 	}
 
-	resp, err := a.postJSON("drafts.delete", payload)
+	resp, err := a.postMultipart("drafts.delete", payload, a.draftQueryParams())
 	if err != nil {
 		return fmt.Errorf("drafts.delete: %w", err)
 	}
@@ -462,6 +474,8 @@ func (a *XoxcAPI) findDMByEmail(email string) (string, error) {
 func (a *XoxcAPI) post(method string, params url.Values) ([]byte, error) {
 	a.rateLimiter.wait()
 
+	params = a.withClientParams(params)
+
 	var body io.Reader
 	if params != nil {
 		body = strings.NewReader(params.Encode())
@@ -469,7 +483,7 @@ func (a *XoxcAPI) post(method string, params url.Values) ([]byte, error) {
 		body = strings.NewReader("")
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/"+method, body)
+	req, err := http.NewRequest("POST", a.methodURL(method), body)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +518,7 @@ func (a *XoxcAPI) postJSON(method string, payload map[string]interface{}) ([]byt
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/"+method, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", a.methodURL(method), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -528,4 +542,100 @@ func (a *XoxcAPI) postJSON(method string, payload map[string]interface{}) ([]byt
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+func (a *XoxcAPI) postMultipart(method string, params url.Values, query url.Values) ([]byte, error) {
+	a.rateLimiter.wait()
+
+	params = a.withClientParams(params)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, values := range params {
+		for _, value := range values {
+			if err := writer.WriteField(key, value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", a.methodURL(method, query), &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == 429 {
+		retryAfter := resp.Header.Get("Retry-After")
+		if secs, err := strconv.Atoi(retryAfter); err == nil {
+			time.Sleep(time.Duration(secs) * time.Second)
+			return a.postMultipart(method, params, query)
+		}
+		time.Sleep(time.Second)
+		return a.postMultipart(method, params, query)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+func (a *XoxcAPI) methodURL(method string, query ...url.Values) string {
+	var rawURL string
+	if a.workspace != "" {
+		rawURL = "https://" + a.workspace + ".slack.com/api/" + method
+	} else {
+		rawURL = baseURL + "/" + method
+	}
+	if len(query) == 0 || len(query[0]) == 0 {
+		return rawURL
+	}
+	return rawURL + "?" + query[0].Encode()
+}
+
+func (a *XoxcAPI) draftQueryParams() url.Values {
+	params := url.Values{
+		"_x_frontend_build_type": {"current"},
+		"_x_desktop_ia":          {"4"},
+		"_x_gantry":              {"true"},
+		"fp":                     {"66"},
+		"_x_num_retries":         {"0"},
+	}
+	if info, err := a.TestAuth(); err == nil && info.TeamID != "" {
+		params.Set("slack_route", info.TeamID)
+	}
+	return params
+}
+
+func (a *XoxcAPI) withClientParams(params url.Values) url.Values {
+	if params == nil {
+		params = url.Values{}
+	} else {
+		clone := url.Values{}
+		for key, values := range params {
+			clone[key] = append([]string(nil), values...)
+		}
+		params = clone
+	}
+
+	if a.token != "" && params.Get("token") == "" {
+		params.Set("token", a.token)
+	}
+	if params.Get("_x_mode") == "" {
+		params.Set("_x_mode", "online")
+	}
+	if params.Get("_x_sonic") == "" {
+		params.Set("_x_sonic", "true")
+	}
+	if params.Get("_x_app_name") == "" {
+		params.Set("_x_app_name", "client")
+	}
+	return params
 }
