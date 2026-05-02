@@ -289,9 +289,9 @@ func Success(msg string) {
 		return
 	}
 	if !opts.NoColor && IsTTY() {
-		fmt.Printf("\033[32m✓\033[0m %s\n", msg)
+		fmt.Fprintf(os.Stderr, "\033[32m✓\033[0m %s\n", msg)
 	} else {
-		fmt.Printf("✓ %s\n", msg)
+		fmt.Fprintf(os.Stderr, "✓ %s\n", msg)
 	}
 }
 
