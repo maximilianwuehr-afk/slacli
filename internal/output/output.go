@@ -53,7 +53,9 @@ func Print(v interface{}) {
 func printJSON(v interface{}) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "output error: %v\n", err)
+	}
 }
 
 func printPlain(v interface{}) {

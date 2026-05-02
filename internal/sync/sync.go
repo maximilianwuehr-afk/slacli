@@ -26,9 +26,9 @@ type Options struct {
 	Full         bool
 	ChannelsOnly bool
 	Days         int
-	ActiveDays   int    // Only sync channels with activity in last N days (0=all)
-	MyChannels   bool   // Only sync channels where user has posted
-	UnreadOnly   bool   // Only sync channels with unread messages
+	ActiveDays   int  // Only sync channels with activity in last N days (0=all)
+	MyChannels   bool // Only sync channels where user has posted
+	UnreadOnly   bool // Only sync channels with unread messages
 	Follow       bool
 	Threads      bool   // Resync thread replies for existing messages
 	Channel      string // Only sync specific channel
@@ -60,7 +60,7 @@ func (s *Syncer) Run(opts Options) (output.SyncResult, error) {
 	if err != nil {
 		return result, fmt.Errorf("open database: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Thread-only resync mode
 	if opts.Threads {
@@ -135,7 +135,9 @@ func (s *Syncer) Run(opts Options) (output.SyncResult, error) {
 
 	if opts.ChannelsOnly {
 		state.LastSync = time.Now().Format(time.RFC3339)
-		db.SaveSyncState(s.cfg, state)
+		if err := db.SaveSyncState(s.cfg, state); err != nil {
+			return result, fmt.Errorf("save sync state: %w", err)
+		}
 		result.Duration = time.Since(start).Round(time.Second).String()
 		return result, nil
 	}
@@ -244,7 +246,9 @@ func (s *Syncer) runMyChannelsSync(store *db.Store, state *db.SyncState, opts Op
 	if len(channelsToSync) == 0 {
 		output.Info("All channels up to date")
 		state.LastSync = time.Now().Format(time.RFC3339)
-		db.SaveSyncState(s.cfg, state)
+		if err := db.SaveSyncState(s.cfg, state); err != nil {
+			return result, fmt.Errorf("save sync state: %w", err)
+		}
 		result.Duration = time.Since(start).Round(time.Second).String()
 		return result, nil
 	}
@@ -352,7 +356,7 @@ func (s *Syncer) runThreadResync(store *db.Store, opts Options, start time.Time)
 	if err != nil {
 		return result, fmt.Errorf("query messages: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type threadInfo struct {
 		threadTS   string
@@ -439,119 +443,6 @@ func (s *Syncer) getCachedOrSearchChannels(state *db.SyncState, days int) ([]str
 type channelSyncInfo struct {
 	ID       string
 	LatestTS string
-}
-
-// fetchChannelInfoBatched fetches all channel info via conversations.list (batched)
-// Returns channels that need syncing and total count of channels processed
-func (s *Syncer) fetchChannelInfoBatched(store *db.Store, state *db.SyncState, wantedChannels map[string]bool) ([]channelSyncInfo, int) {
-	var channelsToSync []channelSyncInfo
-	seenChannels := make(map[string]bool) // Track all channels we've processed
-	cursor := ""
-
-	// Fetch all channels via paginated list (much faster than individual info calls)
-	for {
-		resp, err := s.api.ListChannels(cursor)
-		if err != nil {
-			output.Debug("Failed to list channels: %v", err)
-			break
-		}
-
-		for _, ch := range resp.Channels {
-			// Only process channels we want
-			if !wantedChannels[ch.ID] {
-				continue
-			}
-			seenChannels[ch.ID] = true
-
-			// Upsert channel to DB
-			if err := s.upsertChannel(store, &ch); err != nil {
-				output.Debug("Failed to insert channel %s: %v", ch.ID, err)
-				continue
-			}
-
-			// Check if channel has new messages (skip-unchanged optimization)
-			lastKnownTS := state.ChannelLatestTS[ch.ID]
-			channelLatestTS := ch.Latest.TS
-
-			if lastKnownTS != "" && channelLatestTS != "" && channelLatestTS <= lastKnownTS {
-				// No new messages, skip this channel
-				output.Debug("Channel %s unchanged (latest: %s)", ch.Name, channelLatestTS)
-				continue
-			}
-
-			channelsToSync = append(channelsToSync, channelSyncInfo{
-				ID:       ch.ID,
-				LatestTS: channelLatestTS,
-			})
-		}
-
-		cursor = resp.ResponseMetadata.NextCursor
-		if cursor == "" {
-			break
-		}
-	}
-
-	// Find channels not in the batch list (DMs, private channels we're in but not listed)
-	var missing []string
-	for id := range wantedChannels {
-		if !seenChannels[id] {
-			missing = append(missing, id)
-		}
-	}
-
-	// Fetch missing channels individually in parallel
-	if len(missing) > 0 {
-		output.Debug("Fetching %d channels not in list (DMs/private)", len(missing))
-
-		var (
-			mu  sync.Mutex
-			wg  sync.WaitGroup
-			sem = make(chan struct{}, workerPoolSize)
-		)
-
-		for _, chID := range missing {
-			wg.Add(1)
-			sem <- struct{}{}
-
-			go func(id string) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				ch, err := s.api.GetChannelInfo(id)
-				if err != nil {
-					output.Debug("Failed to get channel %s: %v", id, err)
-					return
-				}
-
-				mu.Lock()
-				seenChannels[id] = true
-				mu.Unlock()
-
-				if err := s.upsertChannel(store, ch); err != nil {
-					output.Debug("Failed to insert channel %s: %v", id, err)
-					return
-				}
-
-				lastKnownTS := state.ChannelLatestTS[id]
-				channelLatestTS := ch.Latest.TS
-
-				if lastKnownTS != "" && channelLatestTS != "" && channelLatestTS <= lastKnownTS {
-					return
-				}
-
-				mu.Lock()
-				channelsToSync = append(channelsToSync, channelSyncInfo{
-					ID:       id,
-					LatestTS: channelLatestTS,
-				})
-				mu.Unlock()
-			}(chID)
-		}
-
-		wg.Wait()
-	}
-
-	return channelsToSync, len(seenChannels)
 }
 
 // fetchChannelInfoParallel fetches channel info in parallel and returns channels that need syncing
@@ -1088,13 +979,17 @@ func (s *Syncer) upsertMessage(store *db.Store, channelID string, msg *slack.Mes
 
 func (s *Syncer) updateChannelLastMessage(store *db.Store, channelID, ts string) {
 	timestamp := slackTSToRFC3339(ts)
-	store.DB().Exec("UPDATE channels SET last_message_ts = ? WHERE id = ?", timestamp, channelID)
+	if _, err := store.DB().Exec("UPDATE channels SET last_message_ts = ? WHERE id = ?", timestamp, channelID); err != nil {
+		output.Debug("Failed to update channel %s last message timestamp: %v", channelID, err)
+	}
 }
 
 // slackTSToRFC3339 converts Slack timestamp (e.g., "1234567890.123456") to RFC3339
 func slackTSToRFC3339(ts string) string {
 	var secs, usecs int64
-	fmt.Sscanf(ts, "%d.%d", &secs, &usecs)
+	if _, err := fmt.Sscanf(ts, "%d.%d", &secs, &usecs); err != nil {
+		return ts
+	}
 	t := time.Unix(secs, usecs*1000)
 	return t.Format(time.RFC3339)
 }

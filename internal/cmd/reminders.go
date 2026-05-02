@@ -103,7 +103,7 @@ func init() {
 
 	remindersAddCmd.Flags().StringVar(&reminderTime, "time", "", "when to trigger (required)")
 	remindersAddCmd.Flags().StringVar(&reminderUser, "user", "", "user to remind (default: self)")
-	remindersAddCmd.MarkFlagRequired("time")
+	cobra.CheckErr(remindersAddCmd.MarkFlagRequired("time"))
 }
 
 func runRemindersList(cmd *cobra.Command, args []string) error {

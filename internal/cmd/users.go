@@ -87,9 +87,9 @@ Examples:
 }
 
 var (
-	usersSearch      string
-	usersLimit       int
-	presenceSet      string
+	usersSearch string
+	usersLimit  int
+	presenceSet string
 )
 
 func init() {
@@ -111,7 +111,7 @@ func runUsersList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	opts := db.UserListOptions{
 		Search: usersSearch,

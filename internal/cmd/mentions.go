@@ -37,7 +37,7 @@ func runMentions(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	opts := db.MentionOptions{
 		Channel: mentionsChannel,
