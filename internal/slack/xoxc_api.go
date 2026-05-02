@@ -509,41 +509,6 @@ func (a *XoxcAPI) post(method string, params url.Values) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// postJSON makes a POST request with JSON body
-func (a *XoxcAPI) postJSON(method string, payload map[string]interface{}) ([]byte, error) {
-	a.rateLimiter.wait()
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", a.methodURL(method), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Handle rate limiting
-	if resp.StatusCode == 429 {
-		retryAfter := resp.Header.Get("Retry-After")
-		if secs, err := strconv.Atoi(retryAfter); err == nil {
-			time.Sleep(time.Duration(secs) * time.Second)
-			return a.postJSON(method, payload)
-		}
-		time.Sleep(time.Second)
-		return a.postJSON(method, payload)
-	}
-
-	return io.ReadAll(resp.Body)
-}
-
 func (a *XoxcAPI) postMultipart(method string, params url.Values, query url.Values) ([]byte, error) {
 	a.rateLimiter.wait()
 
