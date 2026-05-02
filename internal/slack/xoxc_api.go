@@ -159,12 +159,9 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 	// Generate UUID for client_msg_id
 	clientMsgID := generateUUID()
 
-	// Build destinations
-	destination := map[string]interface{}{
-		"channel_id": channelID,
-	}
-	if threadTS != "" {
-		destination["thread_ts"] = threadTS
+	destination, isFromComposer, err := a.draftDestination(channelID, threadTS)
+	if err != nil {
+		return "", err
 	}
 
 	// Build blocks (rich_text format)
@@ -191,8 +188,8 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 		"blocks":           blocks,
 		"attachments":      "",
 		"file_ids":         []string{},
-		"is_from_composer": false,
-		"_x_reason":        "MessageInput:updateDraft",
+		"is_from_composer": isFromComposer,
+		"_x_reason":        draftUpdateReason(isFromComposer),
 	}
 
 	// If updating existing draft, add draft_id
@@ -235,6 +232,39 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 	}
 
 	return result.Draft.ID, nil
+}
+
+func (a *XoxcAPI) draftDestination(channelID, threadTS string) (map[string]interface{}, bool, error) {
+	if threadTS != "" {
+		return map[string]interface{}{
+			"channel_id": channelID,
+			"thread_ts":  threadTS,
+		}, false, nil
+	}
+
+	if strings.HasPrefix(channelID, "D") {
+		info, err := a.ConversationInfo(channelID)
+		if err != nil {
+			return nil, false, fmt.Errorf("lookup DM user: %w", err)
+		}
+		if info.User == "" {
+			return nil, false, fmt.Errorf("lookup DM user: conversation %s has no user", channelID)
+		}
+		return map[string]interface{}{
+			"user_ids": []string{info.User},
+		}, true, nil
+	}
+
+	return map[string]interface{}{
+		"channel_id": channelID,
+	}, true, nil
+}
+
+func draftUpdateReason(isFromComposer bool) string {
+	if isFromComposer {
+		return "ComposerPage:update"
+	}
+	return "MessageInput:updateDraft"
 }
 
 func encodePayloadValues(payload map[string]interface{}) (url.Values, error) {
@@ -426,6 +456,28 @@ func (a *XoxcAPI) ResolveChannel(channel string) (string, error) {
 	return "", fmt.Errorf("channel not found: %s", channel)
 }
 
+// ConversationInfo returns metadata for one conversation.
+func (a *XoxcAPI) ConversationInfo(channelID string) (*ChannelInfo, error) {
+	params := url.Values{"channel": {channelID}}
+	resp, err := a.post("conversations.info", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK      bool        `json:"ok"`
+		Error   string      `json:"error,omitempty"`
+		Channel ChannelInfo `json:"channel"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("conversations.info: %s", result.Error)
+	}
+	return &result.Channel, nil
+}
+
 func (a *XoxcAPI) findDMByEmail(email string) (string, error) {
 	// First, find the user by email
 	params := url.Values{"email": {email}}
@@ -567,6 +619,9 @@ func (a *XoxcAPI) methodURL(method string, query ...url.Values) string {
 
 func (a *XoxcAPI) draftQueryParams() url.Values {
 	params := url.Values{
+		"_x_id":                  {draftRequestID()},
+		"_x_csid":                {draftCSID()},
+		"_x_version_ts":          {strconv.FormatInt(time.Now().Unix(), 10)},
 		"_x_frontend_build_type": {"current"},
 		"_x_desktop_ia":          {"4"},
 		"_x_gantry":              {"true"},
@@ -577,6 +632,24 @@ func (a *XoxcAPI) draftQueryParams() url.Values {
 		params.Set("slack_route", info.TeamID)
 	}
 	return params
+}
+
+func draftRequestID() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	now := time.Now()
+	return fmt.Sprintf("%08x-%d.%03d", b, now.Unix(), now.Nanosecond()/int(time.Millisecond))
+}
+
+func draftCSID() string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	var b [10]byte
+	_, _ = rand.Read(b[:])
+	out := make([]byte, len(b))
+	for i, v := range b {
+		out[i] = alphabet[int(v)%len(alphabet)]
+	}
+	return string(out)
 }
 
 func (a *XoxcAPI) withClientParams(params url.Values) url.Values {
