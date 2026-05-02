@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -414,10 +415,24 @@ type MentionOptions struct {
 
 // GetMentions returns messages where user was mentioned
 func (s *Store) GetMentions(opts MentionOptions) ([]output.Message, error) {
-	// Get current user ID from sync state
+	// Get current user ID from DB sync state table.
+	// Fallback to file-based sync_state.json (used by sync engine) if table is empty.
 	userID, err := s.GetSyncStateValue("user_id")
 	if err != nil {
-		return nil, fmt.Errorf("user not synced: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			if state, loadErr := LoadSyncState(s.cfg); loadErr == nil && state.UserID != "" {
+				userID = state.UserID
+				// Backfill DB sync_state to keep mentions stable on subsequent runs.
+				_ = s.SetSyncStateValue("user_id", state.UserID)
+				if state.TeamID != "" {
+					_ = s.SetSyncStateValue("team_id", state.TeamID)
+				}
+			} else {
+				return nil, fmt.Errorf("user not synced: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("user not synced: %w", err)
+		}
 	}
 
 	query := `SELECT m.id, m.channel_id, COALESCE(c.name, ''), COALESCE(m.author_id, ''),
@@ -748,11 +763,11 @@ func (s *Store) SetSyncStateValue(key, value string) error {
 
 // SyncState represents sync state
 type SyncState struct {
-	LastSync        string            `json:"last_sync"`
-	ChannelCursors  map[string]string `json:"channel_cursors"`
-	LastMessageTS   map[string]string `json:"last_message_ts"`
-	UserID          string            `json:"user_id"`
-	TeamID          string            `json:"team_id"`
+	LastSync       string            `json:"last_sync"`
+	ChannelCursors map[string]string `json:"channel_cursors"`
+	LastMessageTS  map[string]string `json:"last_message_ts"`
+	UserID         string            `json:"user_id"`
+	TeamID         string            `json:"team_id"`
 	// Cached channel IDs from --my-channels search
 	CachedChannelIDs   []string `json:"cached_channel_ids,omitempty"`
 	CachedChannelsTime string   `json:"cached_channels_time,omitempty"`
