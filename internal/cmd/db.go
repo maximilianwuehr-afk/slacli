@@ -76,7 +76,7 @@ func runDBStats(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	stats, err := store.Stats()
 	if err != nil {
@@ -94,7 +94,7 @@ func runDBPrune(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	opts := db.PruneOptions{
 		OlderThanDays: pruneOlderThan,
@@ -114,7 +114,9 @@ func runDBPrune(cmd *cobra.Command, args []string) error {
 	if !pruneForce {
 		fmt.Fprintf(os.Stderr, "Delete messages older than %d days? [y/N] ", pruneOlderThan)
 		var response string
-		fmt.Scanln(&response)
+		if _, err := fmt.Scanln(&response); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
 		if response != "y" && response != "Y" {
 			return fmt.Errorf("cancelled")
 		}
@@ -136,7 +138,7 @@ func runDBVacuum(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	sizeBefore, err := store.Size()
 	if err != nil {
@@ -166,7 +168,9 @@ func runDBReset(cmd *cobra.Command, args []string) error {
 	if !resetForce {
 		fmt.Fprintf(os.Stderr, "This will DELETE ALL DATA. Are you sure? [y/N] ")
 		var response string
-		fmt.Scanln(&response)
+		if _, err := fmt.Scanln(&response); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
 		if response != "y" && response != "Y" {
 			return fmt.Errorf("cancelled")
 		}

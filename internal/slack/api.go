@@ -119,9 +119,9 @@ func (a *API) GetChannelInfo(channelID string) (*ChannelInfo, error) {
 // ListChannels returns all channels
 func (a *API) ListChannels(cursor string) (*ChannelsResponse, error) {
 	params := url.Values{
-		"types":           {"public_channel,private_channel,mpim,im"},
+		"types":            {"public_channel,private_channel,mpim,im"},
 		"exclude_archived": {"false"},
-		"limit":           {"200"},
+		"limit":            {"200"},
 	}
 	if cursor != "" {
 		params.Set("cursor", cursor)
@@ -157,21 +157,21 @@ type ChannelLatest struct {
 
 // ChannelInfo is a channel from the API
 type ChannelInfo struct {
-	ID             string        `json:"id"`
-	Name           string        `json:"name"`
-	IsChannel      bool          `json:"is_channel"`
-	IsGroup        bool          `json:"is_group"`
-	IsIM           bool          `json:"is_im"`
-	IsMPIM         bool          `json:"is_mpim"`
-	IsPrivate      bool          `json:"is_private"`
-	IsArchived     bool          `json:"is_archived"`
-	User           string        `json:"user,omitempty"` // For DMs
-	NumMembers     int           `json:"num_members"`
-	UnreadCount    int           `json:"unread_count,omitempty"`
-	UnreadCountDisplay int       `json:"unread_count_display,omitempty"`
-	LastRead       string        `json:"last_read,omitempty"` // Timestamp of last read message
-	Updated        float64       `json:"updated,omitempty"`   // Unix timestamp of last message
-	Latest         ChannelLatest `json:"latest,omitempty"`    // Latest message (for skip-unchanged)
+	ID                 string        `json:"id"`
+	Name               string        `json:"name"`
+	IsChannel          bool          `json:"is_channel"`
+	IsGroup            bool          `json:"is_group"`
+	IsIM               bool          `json:"is_im"`
+	IsMPIM             bool          `json:"is_mpim"`
+	IsPrivate          bool          `json:"is_private"`
+	IsArchived         bool          `json:"is_archived"`
+	User               string        `json:"user,omitempty"` // For DMs
+	NumMembers         int           `json:"num_members"`
+	UnreadCount        int           `json:"unread_count,omitempty"`
+	UnreadCountDisplay int           `json:"unread_count_display,omitempty"`
+	LastRead           string        `json:"last_read,omitempty"` // Timestamp of last read message
+	Updated            float64       `json:"updated,omitempty"`   // Unix timestamp of last message
+	Latest             ChannelLatest `json:"latest,omitempty"`    // Latest message (for skip-unchanged)
 }
 
 // GetChannelType returns the channel type string
@@ -314,15 +314,15 @@ type RepliesResponse struct {
 
 // MessageInfo is a message from the API
 type MessageInfo struct {
-	Type       string        `json:"type"`
-	Subtype    string        `json:"subtype,omitempty"`
-	User       string        `json:"user"`
-	Text       string        `json:"text"`
-	TS         string        `json:"ts"`
-	ThreadTS   string        `json:"thread_ts,omitempty"`
-	ReplyCount int           `json:"reply_count,omitempty"`
+	Type       string         `json:"type"`
+	Subtype    string         `json:"subtype,omitempty"`
+	User       string         `json:"user"`
+	Text       string         `json:"text"`
+	TS         string         `json:"ts"`
+	ThreadTS   string         `json:"thread_ts,omitempty"`
+	ReplyCount int            `json:"reply_count,omitempty"`
 	Reactions  []ReactionInfo `json:"reactions,omitempty"`
-	Edited     *EditedInfo   `json:"edited,omitempty"`
+	Edited     *EditedInfo    `json:"edited,omitempty"`
 }
 
 // ReactionInfo is a reaction on a message
@@ -411,7 +411,7 @@ func (a *API) findDMByEmail(email string) (string, error) {
 	}
 
 	var dmResult struct {
-		OK      bool `json:"ok"`
+		OK      bool   `json:"ok"`
 		Error   string `json:"error,omitempty"`
 		Channel struct {
 			ID string `json:"id"`
@@ -489,11 +489,11 @@ func (a *API) ScheduleMessage(channelID, text string, postAt int64, threadTS str
 	}
 
 	var result struct {
-		OK               bool   `json:"ok"`
-		Error            string `json:"error,omitempty"`
-		ScheduledMsgID   string `json:"scheduled_message_id"`
-		Channel          string `json:"channel"`
-		PostAt           int64  `json:"post_at"`
+		OK             bool   `json:"ok"`
+		Error          string `json:"error,omitempty"`
+		ScheduledMsgID string `json:"scheduled_message_id"`
+		Channel        string `json:"channel"`
+		PostAt         int64  `json:"post_at"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
@@ -523,7 +523,7 @@ func (a *API) ListScheduledMessages(channelID string) ([]ScheduledMessage, error
 	}
 
 	var result struct {
-		OK       bool `json:"ok"`
+		OK       bool   `json:"ok"`
 		Error    string `json:"error,omitempty"`
 		Messages []struct {
 			ID          string `json:"id"`
@@ -586,7 +586,7 @@ func (a *API) UploadFile(channelID, filePath, initialComment string) (output.Fil
 	if err != nil {
 		return output.FileUploadResult{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Create multipart form
 	var buf bytes.Buffer
@@ -602,12 +602,18 @@ func (a *API) UploadFile(channelID, filePath, initialComment string) (output.Fil
 	}
 
 	// Add other fields
-	writer.WriteField("channels", channelID)
+	if err := writer.WriteField("channels", channelID); err != nil {
+		return output.FileUploadResult{}, err
+	}
 	if initialComment != "" {
-		writer.WriteField("initial_comment", initialComment)
+		if err := writer.WriteField("initial_comment", initialComment); err != nil {
+			return output.FileUploadResult{}, err
+		}
 	}
 
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		return output.FileUploadResult{}, err
+	}
 
 	req, err := http.NewRequest("POST", baseURL+"/files.upload", &buf)
 	if err != nil {
@@ -620,7 +626,7 @@ func (a *API) UploadFile(channelID, filePath, initialComment string) (output.Fil
 	if err != nil {
 		return output.FileUploadResult{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -667,7 +673,7 @@ func (a *API) ListDrafts(limit int) ([]output.Draft, error) {
 	}
 
 	var result struct {
-		OK     bool `json:"ok"`
+		OK     bool   `json:"ok"`
 		Error  string `json:"error,omitempty"`
 		Drafts []struct {
 			ID        string `json:"id"`
@@ -675,9 +681,9 @@ func (a *API) ListDrafts(limit int) ([]output.Draft, error) {
 			Message   struct {
 				Text string `json:"text"`
 			} `json:"message"`
-			ThreadTS  string `json:"thread_ts,omitempty"`
-			DateCreate int64 `json:"date_create"`
-			DateUpdate int64 `json:"date_update"`
+			ThreadTS   string `json:"thread_ts,omitempty"`
+			DateCreate int64  `json:"date_create"`
+			DateUpdate int64  `json:"date_update"`
 		} `json:"drafts"`
 	}
 
@@ -1417,14 +1423,14 @@ func (a *API) GetUserPresence(userID string) (*UserPresence, error) {
 	}
 
 	var result struct {
-		OK       bool   `json:"ok"`
-		Error    string `json:"error,omitempty"`
-		Presence string `json:"presence"`
-		Online   bool   `json:"online"`
-		AutoAway bool   `json:"auto_away"`
-		ManualAway bool `json:"manual_away"`
-		ConnectionCount int `json:"connection_count"`
-		LastActivity int64 `json:"last_activity"`
+		OK              bool   `json:"ok"`
+		Error           string `json:"error,omitempty"`
+		Presence        string `json:"presence"`
+		Online          bool   `json:"online"`
+		AutoAway        bool   `json:"auto_away"`
+		ManualAway      bool   `json:"manual_away"`
+		ConnectionCount int    `json:"connection_count"`
+		LastActivity    int64  `json:"last_activity"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
@@ -1482,7 +1488,7 @@ func (a *API) get(method string, params url.Values) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Handle rate limiting
 	if resp.StatusCode == 429 {
@@ -1516,7 +1522,7 @@ func (a *API) post(method string, payload map[string]interface{}) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Handle rate limiting
 	if resp.StatusCode == 429 {

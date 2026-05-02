@@ -74,9 +74,9 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
 
 	// Bind flags to viper
-	viper.BindPFlag("store", rootCmd.PersistentFlags().Lookup("store"))
-	viper.BindPFlag("output.json", rootCmd.PersistentFlags().Lookup("json"))
-	viper.BindPFlag("output.plain", rootCmd.PersistentFlags().Lookup("plain"))
+	cobra.CheckErr(viper.BindPFlag("store", rootCmd.PersistentFlags().Lookup("store")))
+	cobra.CheckErr(viper.BindPFlag("output.json", rootCmd.PersistentFlags().Lookup("json")))
+	cobra.CheckErr(viper.BindPFlag("output.plain", rootCmd.PersistentFlags().Lookup("plain")))
 
 	// Add subcommands
 	rootCmd.AddCommand(versionCmd)
@@ -86,6 +86,7 @@ func init() {
 	rootCmd.AddCommand(messagesCmd)
 	rootCmd.AddCommand(mentionsCmd)
 	rootCmd.AddCommand(sendCmd)
+	rootCmd.AddCommand(draftCmd)
 	rootCmd.AddCommand(draftsCmd)
 	rootCmd.AddCommand(usersCmd)
 	rootCmd.AddCommand(dbCmd)

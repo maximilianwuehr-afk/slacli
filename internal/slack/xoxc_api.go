@@ -33,14 +33,14 @@ func NewXoxcAPI(client *http.Client, workspace string) *XoxcAPI {
 
 // Draft represents a Slack draft message
 type Draft struct {
-	ID          string `json:"id"`
-	ChannelID   string `json:"channel_id"`
-	ConvID      string `json:"conversation_id"` // Alias for channel_id in some responses
-	Text        string `json:"text"`
-	ThreadTS    string `json:"thread_ts,omitempty"`
-	DateCreate  int64  `json:"date_create"`
-	DateUpdate  int64  `json:"date_update"`
-	DateDelete  int64  `json:"date_delete,omitempty"`
+	ID         string `json:"id"`
+	ChannelID  string `json:"channel_id"`
+	ConvID     string `json:"conversation_id"` // Alias for channel_id in some responses
+	Text       string `json:"text"`
+	ThreadTS   string `json:"thread_ts,omitempty"`
+	DateCreate int64  `json:"date_create"`
+	DateUpdate int64  `json:"date_update"`
+	DateDelete int64  `json:"date_delete,omitempty"`
 }
 
 // ListDrafts returns all drafts for the authenticated user
@@ -59,11 +59,11 @@ func (a *XoxcAPI) ListDrafts() ([]output.Draft, error) {
 		OK     bool   `json:"ok"`
 		Error  string `json:"error,omitempty"`
 		Drafts []struct {
-			ID           string `json:"id"`
-			DateCreated  int64  `json:"date_created"`
-			IsDeleted    bool   `json:"is_deleted"`
-			IsSent       bool   `json:"is_sent"`
-			Blocks       []struct {
+			ID          string `json:"id"`
+			DateCreated int64  `json:"date_created"`
+			IsDeleted   bool   `json:"is_deleted"`
+			IsSent      bool   `json:"is_sent"`
+			Blocks      []struct {
 				Type     string `json:"type"`
 				Elements []struct {
 					Type     string `json:"type"`
@@ -187,9 +187,22 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 	// If updating existing draft, add draft_id
 	if draftID != "" {
 		payload["draft_id"] = draftID
+		meta, err := a.getDraftUpdateMetadata(draftID)
+		if err != nil {
+			return "", err
+		}
+		if meta.ClientMsgID != "" {
+			payload["client_msg_id"] = meta.ClientMsgID
+		}
+		payload["client_last_updated_ts"] = meta.LastUpdatedTS
 	}
 
-	resp, err := a.postJSON("drafts.create", payload)
+	params, err := encodePayloadValues(payload)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := a.post("drafts.create", params)
 	if err != nil {
 		return "", fmt.Errorf("drafts.create: %w", err)
 	}
@@ -211,6 +224,25 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 	}
 
 	return result.Draft.ID, nil
+}
+
+func encodePayloadValues(payload map[string]interface{}) (url.Values, error) {
+	params := url.Values{}
+	for key, value := range payload {
+		switch v := value.(type) {
+		case string:
+			params.Set(key, v)
+		case bool:
+			params.Set(key, strconv.FormatBool(v))
+		default:
+			data, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("encode %s: %w", key, err)
+			}
+			params.Set(key, string(data))
+		}
+	}
+	return params, nil
 }
 
 // generateUUID generates a random UUID v4
@@ -253,15 +285,21 @@ func (a *XoxcAPI) DeleteDraft(channelID, draftID string) error {
 	return nil
 }
 
-// getDraftLastUpdated fetches a draft's last_updated_ts
-func (a *XoxcAPI) getDraftLastUpdated(draftID string) (string, error) {
+type draftUpdateMetadata struct {
+	LastUpdatedTS string
+	ClientMsgID   string
+}
+
+// getDraftUpdateMetadata fetches draft metadata required for Slack's conflict check.
+func (a *XoxcAPI) getDraftUpdateMetadata(draftID string) (draftUpdateMetadata, error) {
 	params := url.Values{
-		"include_channel_names": {"false"},
+		"is_active": {"true"},
+		"limit":     {"1000"},
 	}
 
 	resp, err := a.post("drafts.list", params)
 	if err != nil {
-		return "", err
+		return draftUpdateMetadata{}, err
 	}
 
 	var result struct {
@@ -270,24 +308,28 @@ func (a *XoxcAPI) getDraftLastUpdated(draftID string) (string, error) {
 		Drafts []struct {
 			ID            string `json:"id"`
 			LastUpdatedTS string `json:"last_updated_ts"`
+			ClientMsgID   string `json:"client_msg_id"`
 		} `json:"drafts"`
 	}
 
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", err
+		return draftUpdateMetadata{}, err
 	}
 
 	if !result.OK {
-		return "", fmt.Errorf("drafts.list: %s", result.Error)
+		return draftUpdateMetadata{}, fmt.Errorf("drafts.list: %s", result.Error)
 	}
 
 	for _, d := range result.Drafts {
 		if d.ID == draftID {
-			return d.LastUpdatedTS, nil
+			return draftUpdateMetadata{
+				LastUpdatedTS: d.LastUpdatedTS,
+				ClientMsgID:   d.ClientMsgID,
+			}, nil
 		}
 	}
 
-	return "", fmt.Errorf("draft not found: %s", draftID)
+	return draftUpdateMetadata{}, fmt.Errorf("draft not found: %s", draftID)
 }
 
 // TestAuth verifies the xoxc credentials work
@@ -437,7 +479,7 @@ func (a *XoxcAPI) post(method string, params url.Values) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Handle rate limiting
 	if resp.StatusCode == 429 {
@@ -472,7 +514,7 @@ func (a *XoxcAPI) postJSON(method string, payload map[string]interface{}) ([]byt
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Handle rate limiting
 	if resp.StatusCode == 429 {

@@ -33,7 +33,7 @@ func Open(cfg *config.Config) (*Store, error) {
 	store := &Store{db: db, cfg: cfg}
 
 	if err := store.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
@@ -153,7 +153,7 @@ func (s *Store) migrate() error {
 		"ALTER TABLE channels ADD COLUMN last_read TEXT",
 	}
 	for _, m := range migrations {
-		s.db.Exec(m) // Ignore errors - column may already exist
+		_, _ = s.db.Exec(m) // Ignore errors - column may already exist
 	}
 
 	return nil
@@ -206,7 +206,7 @@ func (s *Store) ListChannels(opts ChannelListOptions) ([]output.Channel, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var channels []output.Channel
 	for rows.Next() {
@@ -219,7 +219,9 @@ func (s *Store) ListChannels(opts ChannelListOptions) ([]output.Channel, error) 
 			return nil, err
 		}
 		if membersJSON != "" {
-			json.Unmarshal([]byte(membersJSON), &ch.Members)
+			if err := json.Unmarshal([]byte(membersJSON), &ch.Members); err != nil {
+				return nil, fmt.Errorf("parse channel members: %w", err)
+			}
 		}
 		channels = append(channels, ch)
 	}
@@ -314,7 +316,7 @@ func (s *Store) GetChannelsWithUnread() ([]output.Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var channels []output.Channel
 	for rows.Next() {
@@ -328,7 +330,9 @@ func (s *Store) GetChannelsWithUnread() ([]output.Channel, error) {
 			return nil, err
 		}
 		if membersJSON != "" {
-			json.Unmarshal([]byte(membersJSON), &ch.Members)
+			if err := json.Unmarshal([]byte(membersJSON), &ch.Members); err != nil {
+				return nil, fmt.Errorf("parse channel members: %w", err)
+			}
 		}
 		// Use computed unread if API unread is 0
 		if ch.UnreadCount == 0 && computedUnread > 0 {
@@ -547,7 +551,7 @@ func (s *Store) ListUsers(opts UserListOptions) ([]output.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var users []output.User
 	for rows.Next() {
@@ -573,18 +577,25 @@ func (s *Store) Stats() (output.DBStats, error) {
 	}
 	stats.SizeBytes = size
 
-	// Count messages
-	s.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&stats.MessageCount)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&stats.MessageCount); err != nil {
+		return stats, fmt.Errorf("count messages: %w", err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM channels").Scan(&stats.ChannelCount); err != nil {
+		return stats, fmt.Errorf("count channels: %w", err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&stats.UserCount); err != nil {
+		return stats, fmt.Errorf("count users: %w", err)
+	}
 
-	// Count channels
-	s.db.QueryRow("SELECT COUNT(*) FROM channels").Scan(&stats.ChannelCount)
-
-	// Count users
-	s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&stats.UserCount)
-
-	// Oldest/newest messages
-	s.db.QueryRow("SELECT MIN(timestamp) FROM messages").Scan(&stats.OldestMessage)
-	s.db.QueryRow("SELECT MAX(timestamp) FROM messages").Scan(&stats.NewestMessage)
+	var oldestMessage, newestMessage sql.NullString
+	if err := s.db.QueryRow("SELECT MIN(timestamp) FROM messages").Scan(&oldestMessage); err != nil {
+		return stats, fmt.Errorf("get oldest message: %w", err)
+	}
+	if err := s.db.QueryRow("SELECT MAX(timestamp) FROM messages").Scan(&newestMessage); err != nil {
+		return stats, fmt.Errorf("get newest message: %w", err)
+	}
+	stats.OldestMessage = oldestMessage.String
+	stats.NewestMessage = newestMessage.String
 
 	return stats, nil
 }
@@ -664,15 +675,30 @@ func Reset(cfg *config.Config, keepAuth bool) error {
 		return err
 	}
 	// Also remove WAL and SHM files
-	os.Remove(dbPath + "-wal")
-	os.Remove(dbPath + "-shm")
-
-	if !keepAuth {
-		os.Remove(cfg.CredentialsPath())
+	if err := removeIfExists(dbPath + "-wal"); err != nil {
+		return err
+	}
+	if err := removeIfExists(dbPath + "-shm"); err != nil {
+		return err
 	}
 
-	os.Remove(cfg.SyncStatePath())
+	if !keepAuth {
+		if err := removeIfExists(cfg.CredentialsPath()); err != nil {
+			return err
+		}
+	}
 
+	if err := removeIfExists(cfg.SyncStatePath()); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return nil
 }
 
@@ -711,7 +737,7 @@ func (s *Store) queryMessages(query string, args ...interface{}) ([]output.Messa
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var messages []output.Message
 	for rows.Next() {
@@ -724,7 +750,9 @@ func (s *Store) queryMessages(query string, args ...interface{}) ([]output.Messa
 			return nil, err
 		}
 		if reactionsJSON != "" && reactionsJSON != "[]" {
-			json.Unmarshal([]byte(reactionsJSON), &msg.Reactions)
+			if err := json.Unmarshal([]byte(reactionsJSON), &msg.Reactions); err != nil {
+				return nil, fmt.Errorf("parse message reactions: %w", err)
+			}
 		}
 		messages = append(messages, msg)
 	}

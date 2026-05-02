@@ -260,7 +260,14 @@ cat report.txt | slacli send "boss@company.com" --stdin
 
 ### Drafts
 
-Drafts support two modes:
+Use `draft` when you want to compose a native Slack draft without sending it:
+
+```bash
+slacli draft "#engineering" "RFC: New auth system"
+echo "Thread reply" | slacli draft "#eng" --thread 123.456 --stdin
+```
+
+The broader `drafts` command supports two modes:
 1. **Real Drafts (xoxc)** — Syncs with Slack's native drafts (requires xoxc token setup)
 2. **Scheduled Messages** — Fallback mode using scheduled messages (90 days out)
 
@@ -283,6 +290,8 @@ To get xoxc credentials:
 
 **Commands:**
 ```bash
+slacli draft "#engineering" "RFC: New auth system"     # Create native Slack draft
+slacli draft "#eng" --thread 123.456 --stdin           # Create draft from stdin
 slacli drafts list                                    # List all drafts
 slacli drafts list --channel "#engineering"           # Filter by channel
 slacli drafts list --json                             # JSON output

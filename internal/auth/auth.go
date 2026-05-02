@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -89,7 +90,7 @@ func Login(cfg *config.Config) error {
 		return fmt.Errorf("start callback server on port %d: %w", callbackPort, err)
 	}
 	listener := tls.NewListener(tcpListener, tlsConfig)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	redirectURI := fmt.Sprintf("https://127.0.0.1:%d/callback", callbackPort)
 
@@ -99,8 +100,7 @@ func Login(cfg *config.Config) error {
 	clientSecret := os.Getenv("SLACLI_CLIENT_SECRET")
 
 	if clientID == "" || clientSecret == "" {
-		return fmt.Errorf("SLACLI_CLIENT_ID and SLACLI_CLIENT_SECRET environment variables required.\n" +
-			"Create a Slack app at https://api.slack.com/apps and set these variables.")
+		return fmt.Errorf("missing SLACLI_CLIENT_ID or SLACLI_CLIENT_SECRET; create a Slack app at https://api.slack.com/apps and set these variables")
 	}
 
 	authParams := url.Values{
@@ -153,7 +153,7 @@ func Login(cfg *config.Config) error {
 
 			// Success response
 			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprint(w, `<!DOCTYPE html>
+			if _, err := fmt.Fprint(w, `<!DOCTYPE html>
 <html>
 <head><title>slacli</title></head>
 <body style="font-family: system-ui; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;">
@@ -162,13 +162,19 @@ func Login(cfg *config.Config) error {
 <p>You can close this window and return to your terminal.</p>
 </div>
 </body>
-</html>`)
+</html>`); err != nil {
+				output.Debug("Failed to write OAuth callback response: %v", err)
+			}
 
 			codeChan <- code
 		}),
 	}
 
-	go server.Serve(listener)
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- err
+		}
+	}()
 
 	// Wait for code or error with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -195,7 +201,7 @@ func Login(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("token exchange: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var tokenResp struct {
 		OK          bool   `json:"ok"`

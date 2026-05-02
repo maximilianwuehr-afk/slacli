@@ -25,13 +25,13 @@ func setupTestDB(t *testing.T) (*Store, func()) {
 
 	store, err := Open(cfg)
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to open database: %v", err)
 	}
 
 	cleanup := func() {
-		store.Close()
-		os.RemoveAll(tmpDir)
+		_ = store.Close()
+		_ = os.RemoveAll(tmpDir)
 	}
 
 	return store, cleanup
@@ -296,7 +296,9 @@ func TestPrune(t *testing.T) {
 
 	// Verify
 	var count int
-	store.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count); err != nil {
+		t.Fatalf("Count messages: %v", err)
+	}
 	if count != 1 {
 		t.Errorf("Expected 1 message remaining, got %d", count)
 	}
