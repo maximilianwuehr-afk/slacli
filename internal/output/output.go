@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -268,6 +269,152 @@ func Info(format string, args ...interface{}) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// Progress renders a lightweight stderr spinner for long-running operations.
+type Progress struct {
+	label   string
+	total   int
+	done    int
+	detail  string
+	start   time.Time
+	enabled bool
+
+	mu     sync.Mutex
+	stop   chan struct{}
+	closed bool
+	frame  int
+}
+
+// StartProgress starts a progress indicator. It is disabled for quiet/json
+// output and for non-interactive terminals, keeping stdout machine-readable.
+func StartProgress(label string, total int) *Progress {
+	p := &Progress{
+		label:   label,
+		total:   total,
+		start:   time.Now(),
+		enabled: !opts.Quiet && !opts.JSON && term.IsTerminal(int(os.Stderr.Fd())),
+		stop:    make(chan struct{}),
+	}
+	if opts.Quiet || opts.JSON {
+		return p
+	}
+	if !p.enabled {
+		if total > 0 {
+			Info("%s (%d)", label, total)
+		} else {
+			Info("%s...", label)
+		}
+		return p
+	}
+
+	p.render()
+	go func() {
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.mu.Lock()
+				if p.closed {
+					p.mu.Unlock()
+					return
+				}
+				p.frame++
+				p.renderLocked()
+				p.mu.Unlock()
+			case <-p.stop:
+				return
+			}
+		}
+	}()
+
+	return p
+}
+
+// Add advances progress by delta.
+func (p *Progress) Add(delta int, detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.done += delta
+	if detail != "" {
+		p.detail = detail
+	}
+	if p.enabled {
+		p.renderLocked()
+	}
+}
+
+// Done stops the progress indicator and prints a final line.
+func (p *Progress) Done(detail string) {
+	p.finish("✓", detail)
+}
+
+// Fail stops the progress indicator and prints a failure line.
+func (p *Progress) Fail(detail string) {
+	p.finish("✗", detail)
+}
+
+func (p *Progress) finish(mark, detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.closed = true
+	close(p.stop)
+	if detail != "" {
+		p.detail = detail
+	}
+	if !p.enabled {
+		return
+	}
+	p.clearLine()
+	status := p.statusLocked()
+	if status != "" {
+		status = " " + status
+	}
+	fmt.Fprintf(os.Stderr, "%s %s%s in %s\n", mark, p.label, status, time.Since(p.start).Round(time.Second))
+}
+
+func (p *Progress) render() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.renderLocked()
+}
+
+func (p *Progress) renderLocked() {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	p.clearLine()
+	status := p.statusLocked()
+	if status != "" {
+		status = " " + status
+	}
+	fmt.Fprintf(os.Stderr, "%s %s%s", frames[p.frame%len(frames)], p.label, status)
+}
+
+func (p *Progress) statusLocked() string {
+	parts := []string{}
+	if p.total > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d", p.done, p.total))
+	}
+	if p.detail != "" {
+		parts = append(parts, p.detail)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (p *Progress) clearLine() {
+	fmt.Fprint(os.Stderr, "\r\033[2K")
 }
 
 // Debug prints a debug message to stderr (only if verbose)
