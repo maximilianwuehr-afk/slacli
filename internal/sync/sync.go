@@ -20,7 +20,8 @@ const (
 	messageWorkerPoolSize     = 12
 	threadWorkerPoolSize      = 8
 	// Cache duration for channel IDs from search
-	channelCacheDuration = 3 * time.Hour
+	channelCacheDuration       = 3 * time.Hour
+	activeChannelCacheDuration = 5 * time.Minute
 )
 
 // Options for sync operation
@@ -108,6 +109,9 @@ func (s *Syncer) Run(opts Options) (output.SyncResult, error) {
 		state.ChannelLastSynced = make(map[string]string)
 		state.CachedChannelIDs = nil
 		state.CachedChannelsTime = ""
+		state.CachedActiveChannelIDs = nil
+		state.CachedActiveChannelsTime = ""
+		state.CachedActiveChannelsDays = 0
 	}
 
 	// Get auth info
@@ -128,9 +132,20 @@ func (s *Syncer) Run(opts Options) (output.SyncResult, error) {
 		return s.runUnreadSync(store, state, opts, start)
 	}
 
-	// Full sync path: sync all users and channels
+	// Fast active-days path: use Slack search to find recently active channels
+	// instead of paginating and storing every channel in the workspace.
+	if opts.ActiveDays > 0 && !opts.Full && !opts.ChannelsOnly {
+		return s.runActiveDaysSync(store, state, opts, start)
+	}
+
+	return s.runFullSync(store, state, opts, start)
+}
+
+func (s *Syncer) runFullSync(store *db.Store, state *db.SyncState, opts Options, start time.Time) (output.SyncResult, error) {
+	result := output.SyncResult{}
+
 	progress := output.StartProgress("Syncing users", 0)
-	usersSynced, err := s.syncUsers(store)
+	usersSynced, err := s.syncUsers(store, progress)
 	if err != nil {
 		progress.Fail("failed")
 		return result, fmt.Errorf("sync users: %w", err)
@@ -139,7 +154,7 @@ func (s *Syncer) Run(opts Options) (output.SyncResult, error) {
 	result.UsersSynced = usersSynced
 
 	progress = output.StartProgress("Syncing channels", 0)
-	channelsSynced, err := s.syncChannels(store)
+	channelsSynced, err := s.syncChannels(store, progress)
 	if err != nil {
 		progress.Fail("failed")
 		return result, fmt.Errorf("sync channels: %w", err)
@@ -185,6 +200,92 @@ func (s *Syncer) Run(opts Options) (output.SyncResult, error) {
 	result.MessagesSynced = messagesSynced
 
 	// Save sync state
+	state.LastSync = time.Now().Format(time.RFC3339)
+	if err := db.SaveSyncState(s.cfg, state); err != nil {
+		return result, fmt.Errorf("save sync state: %w", err)
+	}
+
+	result.Duration = time.Since(start).Round(time.Second).String()
+	return result, nil
+}
+
+// runActiveDaysSync is a fast path for --active-days. It finds recently active
+// channels through Slack search, then only fetches details and histories there.
+func (s *Syncer) runActiveDaysSync(store *db.Store, state *db.SyncState, opts Options, start time.Time) (output.SyncResult, error) {
+	result := output.SyncResult{}
+
+	activeChannelIDs, fromCache := s.getCachedActiveChannels(state, opts.ActiveDays)
+	if fromCache {
+		output.Info("Using cached active channel list (%d channels)", len(activeChannelIDs))
+	} else {
+		progress := output.StartProgress("Finding active channels via search", 0)
+		var err error
+		activeChannelIDs, err = s.api.GetActiveChannelIDs(opts.ActiveDays)
+		if err != nil {
+			progress.Fail("failed")
+			output.Warn(fmt.Sprintf("Active channel search failed; falling back to full metadata sync: %v", err))
+			return s.runFullSync(store, state, opts, start)
+		}
+		progress.Done(fmt.Sprintf("%d channels", len(activeChannelIDs)))
+		state.CachedActiveChannelIDs = activeChannelIDs
+		state.CachedActiveChannelsTime = time.Now().Format(time.RFC3339)
+		state.CachedActiveChannelsDays = opts.ActiveDays
+	}
+
+	whitelistIDs := []string{}
+	for _, ch := range s.cfg.WhitelistChannels {
+		if id, err := s.api.ResolveChannel(ch); err == nil {
+			whitelistIDs = append(whitelistIDs, id)
+		}
+	}
+
+	channelSet := make(map[string]bool)
+	for _, id := range activeChannelIDs {
+		channelSet[id] = true
+	}
+	for _, id := range whitelistIDs {
+		channelSet[id] = true
+	}
+
+	output.Info("Found %d active channels (search: %d, whitelist: %d)", len(channelSet), len(activeChannelIDs), len(whitelistIDs))
+	if len(channelSet) == 0 {
+		state.LastSync = time.Now().Format(time.RFC3339)
+		if err := db.SaveSyncState(s.cfg, state); err != nil {
+			return result, fmt.Errorf("save sync state: %w", err)
+		}
+		result.Duration = time.Since(start).Round(time.Second).String()
+		return result, nil
+	}
+
+	channelIDs := make([]string, 0, len(channelSet))
+	for id := range channelSet {
+		channelIDs = append(channelIDs, id)
+	}
+
+	progress := output.StartProgress("Fetching active channel details", len(channelIDs))
+	channelsToSync := s.fetchChannelInfoParallel(store, state, channelIDs, progress, fromCache)
+	progress.Done(fmt.Sprintf("%d changed", len(channelsToSync)))
+	result.ChannelsSynced = len(channelIDs)
+
+	if len(channelsToSync) == 0 {
+		output.Info("All active channels up to date")
+		state.LastSync = time.Now().Format(time.RFC3339)
+		if err := db.SaveSyncState(s.cfg, state); err != nil {
+			return result, fmt.Errorf("save sync state: %w", err)
+		}
+		result.Duration = time.Since(start).Round(time.Second).String()
+		return result, nil
+	}
+
+	oldest := time.Now().AddDate(0, 0, -opts.Days).Unix()
+	oldestTS := fmt.Sprintf("%d.000000", oldest)
+
+	output.Info("Skipping thread replies in active-days history sync; run `slacli sync --threads --active-days %d` to fill replies", opts.ActiveDays)
+	progress = output.StartProgress("Syncing active channel histories", len(channelsToSync))
+	messagesSynced := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress, false)
+	progress.Done(fmt.Sprintf("%d messages", messagesSynced))
+	result.MessagesSynced = messagesSynced
+
 	state.LastSync = time.Now().Format(time.RFC3339)
 	if err := db.SaveSyncState(s.cfg, state); err != nil {
 		return result, fmt.Errorf("save sync state: %w", err)
@@ -255,7 +356,7 @@ func (s *Syncer) runMyChannelsSync(store *db.Store, state *db.SyncState, opts Op
 
 	// Step 2: Fetch channel info in parallel and check for changes
 	progress := output.StartProgress("Fetching channel details", len(channelIDs))
-	channelsToSync := s.fetchChannelInfoParallel(store, state, channelIDs, progress)
+	channelsToSync := s.fetchChannelInfoParallel(store, state, channelIDs, progress, false)
 	progress.Done(fmt.Sprintf("%d changed", len(channelsToSync)))
 	result.ChannelsSynced = len(channelIDs)
 
@@ -274,7 +375,7 @@ func (s *Syncer) runMyChannelsSync(store *db.Store, state *db.SyncState, opts Op
 	oldestTS := fmt.Sprintf("%d.000000", oldest)
 
 	progress = output.StartProgress("Syncing channel histories", len(channelsToSync))
-	messagesSynced := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress)
+	messagesSynced := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress, true)
 	progress.Done(fmt.Sprintf("%d messages", messagesSynced))
 	result.MessagesSynced = messagesSynced
 
@@ -337,7 +438,7 @@ func (s *Syncer) runUnreadSync(store *db.Store, state *db.SyncState, opts Option
 	oldestTS := fmt.Sprintf("%d.000000", oldest)
 
 	progress = output.StartProgress("Syncing unread histories", len(channelsToSync))
-	messagesSynced := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress)
+	messagesSynced := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress, true)
 	progress.Done(fmt.Sprintf("%d messages", messagesSynced))
 	result.MessagesSynced = messagesSynced
 
@@ -486,6 +587,36 @@ func (s *Syncer) getCachedOrSearchChannels(state *db.SyncState, days int) ([]str
 	return state.CachedChannelIDs, true
 }
 
+func (s *Syncer) getCachedActiveChannels(state *db.SyncState, days int) ([]string, bool) {
+	if len(state.CachedActiveChannelIDs) == 0 || state.CachedActiveChannelsTime == "" {
+		return nil, false
+	}
+	if state.CachedActiveChannelsDays != days {
+		return nil, false
+	}
+
+	cachedTime, err := time.Parse(time.RFC3339, state.CachedActiveChannelsTime)
+	if err != nil {
+		return nil, false
+	}
+	if time.Since(cachedTime) > activeChannelCacheDuration {
+		return nil, false
+	}
+
+	return state.CachedActiveChannelIDs, true
+}
+
+func recentlySynced(ts string, within time.Duration) bool {
+	if ts == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return false
+	}
+	return time.Since(t) <= within
+}
+
 // channelSyncInfo holds info needed to sync a channel
 type channelSyncInfo struct {
 	ID       string
@@ -494,7 +625,7 @@ type channelSyncInfo struct {
 
 // fetchChannelInfoParallel fetches channel info in parallel and returns channels that need syncing
 // Sync criteria: latest.ts > our_last_sync (new messages exist) OR never synced
-func (s *Syncer) fetchChannelInfoParallel(store *db.Store, state *db.SyncState, channelIDs []string, progress *output.Progress) []channelSyncInfo {
+func (s *Syncer) fetchChannelInfoParallel(store *db.Store, state *db.SyncState, channelIDs []string, progress *output.Progress, skipFresh bool) []channelSyncInfo {
 	var (
 		mu             sync.Mutex
 		wg             sync.WaitGroup
@@ -512,6 +643,16 @@ func (s *Syncer) fetchChannelInfoParallel(store *db.Store, state *db.SyncState, 
 			defer func() { <-sem }() // Release semaphore
 			defer progress.Add(1, "")
 
+			mu.Lock()
+			lastSynced := state.ChannelLastSynced[chID]
+			mu.Unlock()
+			if skipFresh && recentlySynced(lastSynced, activeChannelCacheDuration) {
+				mu.Lock()
+				skipped++
+				mu.Unlock()
+				return
+			}
+
 			ch, err := s.api.GetChannelInfo(chID)
 			if err != nil {
 				output.Debug("Failed to get channel %s: %v", chID, err)
@@ -523,8 +664,6 @@ func (s *Syncer) fetchChannelInfoParallel(store *db.Store, state *db.SyncState, 
 				output.Debug("Failed to insert channel %s: %v", chID, err)
 				return
 			}
-
-			lastSynced := state.ChannelLastSynced[chID]
 
 			// Never synced before - sync it
 			if lastSynced == "" {
@@ -554,6 +693,7 @@ func (s *Syncer) fetchChannelInfoParallel(store *db.Store, state *db.SyncState, 
 			// No new messages, skip
 			mu.Lock()
 			skipped++
+			state.ChannelLastSynced[chID] = time.Now().Format(time.RFC3339)
 			mu.Unlock()
 		}(channelID)
 	}
@@ -567,7 +707,7 @@ func (s *Syncer) fetchChannelInfoParallel(store *db.Store, state *db.SyncState, 
 }
 
 // syncMessagesParallel syncs messages for multiple channels in parallel
-func (s *Syncer) syncMessagesParallel(store *db.Store, state *db.SyncState, channels []channelSyncInfo, oldestTS string, progress *output.Progress) int {
+func (s *Syncer) syncMessagesParallel(store *db.Store, state *db.SyncState, channels []channelSyncInfo, oldestTS string, progress *output.Progress, includeThreads bool) int {
 	var (
 		mu          sync.Mutex
 		wg          sync.WaitGroup
@@ -590,7 +730,7 @@ func (s *Syncer) syncMessagesParallel(store *db.Store, state *db.SyncState, chan
 				progress.Add(1, fmt.Sprintf("%d messages", syncedSoFar))
 			}()
 
-			n, err := s.syncChannelMessagesWithLock(store, state, &stateMu, chInfo.ID, oldestTS)
+			n, err := s.syncChannelMessagesWithLock(store, state, &stateMu, chInfo.ID, oldestTS, includeThreads)
 			if err != nil {
 				output.Debug("Failed to sync messages for %s: %v", chInfo.ID, err)
 				return
@@ -623,7 +763,7 @@ func (s *Syncer) syncMessagesParallel(store *db.Store, state *db.SyncState, chan
 }
 
 // syncChannelMessagesWithLock syncs messages for a channel with mutex protection for state
-func (s *Syncer) syncChannelMessagesWithLock(store *db.Store, state *db.SyncState, stateMu *sync.Mutex, channelID, oldestTS string) (int, error) {
+func (s *Syncer) syncChannelMessagesWithLock(store *db.Store, state *db.SyncState, stateMu *sync.Mutex, channelID, oldestTS string, includeThreads bool) (int, error) {
 	count := 0
 
 	stateMu.Lock()
@@ -652,7 +792,7 @@ func (s *Syncer) syncChannelMessagesWithLock(store *db.Store, state *db.SyncStat
 			count++
 
 			// Track threads that need reply syncing
-			if isThreadParent(&msg) {
+			if includeThreads && isThreadParent(&msg) && s.threadNeedsReplies(store, channelID, msg.TS, msg.ReplyCount) {
 				// This is a parent message with replies
 				threadsToSync = append(threadsToSync, msg.TS)
 			}
@@ -744,7 +884,7 @@ func (s *Syncer) Follow(opts Options) error {
 	}
 }
 
-func (s *Syncer) syncUsers(store *db.Store) (int, error) {
+func (s *Syncer) syncUsers(store *db.Store, progress *output.Progress) (int, error) {
 	count := 0
 	cursor := ""
 
@@ -765,6 +905,7 @@ func (s *Syncer) syncUsers(store *db.Store) (int, error) {
 			}
 			count++
 		}
+		progress.Add(len(resp.Members), fmt.Sprintf("%d users", count))
 
 		cursor = resp.ResponseMetadata.NextCursor
 		if cursor == "" {
@@ -798,7 +939,7 @@ func (s *Syncer) upsertUser(store *db.Store, user *slack.UserInfo) error {
 	return err
 }
 
-func (s *Syncer) syncChannels(store *db.Store) (int, error) {
+func (s *Syncer) syncChannels(store *db.Store, progress *output.Progress) (int, error) {
 	count := 0
 	cursor := ""
 
@@ -815,6 +956,7 @@ func (s *Syncer) syncChannels(store *db.Store) (int, error) {
 			}
 			count++
 		}
+		progress.Add(len(resp.Channels), fmt.Sprintf("%d channels", count))
 
 		cursor = resp.ResponseMetadata.NextCursor
 		if cursor == "" {
@@ -913,7 +1055,7 @@ func (s *Syncer) syncMessages(store *db.Store, state *db.SyncState, oldestTS str
 	}
 
 	progress := output.StartProgress("Syncing channel histories", len(channelsToSync))
-	count := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress)
+	count := s.syncMessagesParallel(store, state, channelsToSync, oldestTS, progress, true)
 	progress.Done(fmt.Sprintf("%d messages", count))
 	return count, nil
 }
@@ -933,6 +1075,23 @@ func channelActivityTime(ch output.Channel) (time.Time, bool) {
 
 func isThreadParent(msg *slack.MessageInfo) bool {
 	return msg.ReplyCount > 0 && (msg.ThreadTS == "" || msg.ThreadTS == msg.TS)
+}
+
+func (s *Syncer) threadNeedsReplies(store *db.Store, channelID, threadTS string, replyCount int) bool {
+	if replyCount <= 0 {
+		return false
+	}
+
+	var localReplies int
+	err := store.DB().QueryRow(`
+		SELECT COUNT(*) FROM messages
+		WHERE channel_id = ? AND thread_ts = ? AND id != ?
+	`, channelID, threadTS, threadTS).Scan(&localReplies)
+	if err != nil {
+		output.Debug("Failed to count thread replies for %s: %v", threadTS, err)
+		return true
+	}
+	return localReplies < replyCount
 }
 
 func (s *Syncer) upsertMessage(store *db.Store, channelID string, msg *slack.MessageInfo) error {

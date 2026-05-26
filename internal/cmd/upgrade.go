@@ -87,7 +87,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	installedPath, err := goBinPath("slack")
 	if err == nil {
 		output.Info("Installed binary: %s", installedPath)
-		if current, currentErr := os.Executable(); currentErr == nil && current != installedPath {
+		if current, currentErr := os.Executable(); currentErr == nil && !sameExecutable(current, installedPath) {
 			output.Warn(fmt.Sprintf("Current executable is %s; ensure %s is first in PATH", current, filepath.Dir(installedPath)))
 		}
 	}
@@ -101,6 +101,20 @@ func gitCommit(dir string) (string, error) {
 		return "", fmt.Errorf("git rev-parse: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func sameExecutable(a, b string) bool {
+	aPath, aErr := filepath.EvalSymlinks(a)
+	if aErr != nil {
+		aPath = a
+	}
+	bPath, bErr := filepath.EvalSymlinks(b)
+	if bErr != nil {
+		bPath = b
+	}
+	aPath, _ = filepath.Abs(aPath)
+	bPath, _ = filepath.Abs(bPath)
+	return aPath == bPath
 }
 
 func goBinPath(binary string) (string, error) {

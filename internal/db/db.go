@@ -799,6 +799,10 @@ type SyncState struct {
 	// Cached channel IDs from --my-channels search
 	CachedChannelIDs   []string `json:"cached_channel_ids,omitempty"`
 	CachedChannelsTime string   `json:"cached_channels_time,omitempty"`
+	// Cached channel IDs from --active-days search
+	CachedActiveChannelIDs   []string `json:"cached_active_channel_ids,omitempty"`
+	CachedActiveChannelsTime string   `json:"cached_active_channels_time,omitempty"`
+	CachedActiveChannelsDays int      `json:"cached_active_channels_days,omitempty"`
 	// Channel latest timestamps for skip-unchanged optimization
 	ChannelLatestTS map[string]string `json:"channel_latest_ts,omitempty"`
 	// Track when each channel was last synced (for skip-recently-synced)

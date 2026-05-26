@@ -179,12 +179,12 @@ slacli sync                       # Incremental sync
 slacli sync --full                # Full re-sync (reset cursors)
 slacli sync --my-channels         # Fast: only channels you've posted in
 slacli sync --days 60             # Sync 60 days of history
-slacli sync --active-days 7       # Only channels active in last 7 days
+slacli sync --active-days 7       # Fast: active channel messages
 slacli sync --channels-only       # Sync channel metadata only
 slacli sync --follow              # Continuous sync (30s intervals)
 slacli sync --threads             # Fill missing thread replies
 slacli sync --threads --full      # Force re-sync all known thread replies
-slacli sync --threads --active-days 7  # Only recent thread parents
+slacli sync --threads --active-days 7  # Fill recent thread replies
 ```
 
 ### Upgrade
