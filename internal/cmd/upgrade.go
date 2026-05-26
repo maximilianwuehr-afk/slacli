@@ -12,7 +12,7 @@ import (
 	"slacli/internal/output"
 )
 
-const upgradeModule = "github.com/maximilianwuehr/slacli/cmd/slack"
+const upgradeRepoURL = "https://github.com/maximilianwuehr-afk/slacli.git"
 
 var upgradeRef string
 
@@ -34,24 +34,55 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	if _, err := exec.LookPath("go"); err != nil {
 		return fmt.Errorf("go toolchain required for upgrade: %w", err)
 	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return fmt.Errorf("git required for upgrade: %w", err)
+	}
 
 	ref := strings.TrimPrefix(strings.TrimSpace(upgradeRef), "@")
 	if ref == "" {
 		ref = "latest"
 	}
-	target := upgradeModule + "@" + ref
 
-	output.Info("Installing %s", target)
-	install := exec.Command("go", "install", target)
+	tmpDir, err := os.MkdirTemp("", "slacli-upgrade-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	checkoutDir := filepath.Join(tmpDir, "slacli")
+	output.Info("Fetching %s", upgradeRepoURL)
+	clone := exec.Command("git", "clone", "--quiet", upgradeRepoURL, checkoutDir)
+	clone.Stdout = os.Stderr
+	clone.Stderr = os.Stderr
+	if err := clone.Run(); err != nil {
+		return fmt.Errorf("git clone %s: %w", upgradeRepoURL, err)
+	}
+
+	if ref != "latest" {
+		checkout := exec.Command("git", "-C", checkoutDir, "checkout", "--quiet", ref)
+		checkout.Stdout = os.Stderr
+		checkout.Stderr = os.Stderr
+		if err := checkout.Run(); err != nil {
+			return fmt.Errorf("git checkout %s: %w", ref, err)
+		}
+	}
+
+	commit, err := gitCommit(checkoutDir)
+	if err != nil {
+		return err
+	}
+
+	output.Info("Installing %s@%s", upgradeRepoURL, commit)
+	install := exec.Command("go", "install", "./cmd/slack")
+	install.Dir = checkoutDir
 	install.Stdout = os.Stderr
 	install.Stderr = os.Stderr
-	install.Env = withEnv(os.Environ(), "GOPROXY=direct")
 	if err := install.Run(); err != nil {
-		return fmt.Errorf("go install %s: %w", target, err)
+		return fmt.Errorf("go install ./cmd/slack: %w", err)
 	}
 
 	output.Success("Upgrade complete")
-	output.Info("Installed target: %s", target)
+	output.Info("Installed target: %s@%s", upgradeRepoURL, commit)
 
 	installedPath, err := goBinPath("slack")
 	if err == nil {
@@ -64,16 +95,12 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func withEnv(env []string, kv string) []string {
-	key := strings.SplitN(kv, "=", 2)[0]
-	out := make([]string, 0, len(env)+1)
-	for _, item := range env {
-		if strings.HasPrefix(item, key+"=") {
-			continue
-		}
-		out = append(out, item)
+func gitCommit(dir string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse: %w", err)
 	}
-	return append(out, kv)
+	return strings.TrimSpace(string(out)), nil
 }
 
 func goBinPath(binary string) (string, error) {
