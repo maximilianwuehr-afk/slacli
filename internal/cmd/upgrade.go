@@ -104,6 +104,12 @@ func gitCommit(dir string) (string, error) {
 }
 
 func sameExecutable(a, b string) bool {
+	aInfo, aStatErr := os.Stat(a)
+	bInfo, bStatErr := os.Stat(b)
+	if aStatErr == nil && bStatErr == nil && os.SameFile(aInfo, bInfo) {
+		return true
+	}
+
 	aPath, aErr := filepath.EvalSymlinks(a)
 	if aErr != nil {
 		aPath = a
