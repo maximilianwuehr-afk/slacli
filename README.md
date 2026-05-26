@@ -182,6 +182,16 @@ slacli sync --days 60             # Sync 60 days of history
 slacli sync --active-days 7       # Only channels active in last 7 days
 slacli sync --channels-only       # Sync channel metadata only
 slacli sync --follow              # Continuous sync (30s intervals)
+slacli sync --threads             # Fill missing thread replies
+slacli sync --threads --full      # Force re-sync all known thread replies
+slacli sync --threads --active-days 7  # Only recent thread parents
+```
+
+### Upgrade
+
+```bash
+slacli upgrade                    # Install latest from GitHub
+slacli upgrade --ref v0.3.0       # Install a tag, branch, or commit
 ```
 
 ### Channels

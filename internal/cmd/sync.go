@@ -36,7 +36,7 @@ func init() {
 	syncCmd.Flags().IntVar(&syncActiveDays, "active-days", 0, "only sync channels active in last N days (0=all)")
 	syncCmd.Flags().BoolVar(&syncMyChannels, "my-channels", false, "only sync channels where you've posted (uses search API)")
 	syncCmd.Flags().BoolVar(&syncFollow, "follow", false, "continuous sync loop")
-	syncCmd.Flags().BoolVar(&syncThreads, "threads", false, "resync thread replies for existing messages with reply_count > 0")
+	syncCmd.Flags().BoolVar(&syncThreads, "threads", false, "fill missing thread replies (use --full to force resync)")
 	syncCmd.Flags().StringVar(&syncChannel, "channel", "", "only sync specific channel (name or ID)")
 }
 

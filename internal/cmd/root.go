@@ -81,6 +81,7 @@ func init() {
 	// Add subcommands
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(authCmd)
+	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(channelsCmd)
 	rootCmd.AddCommand(messagesCmd)
