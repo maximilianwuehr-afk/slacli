@@ -956,10 +956,19 @@ func (a *API) GetMyChannelIDs(days int) ([]string, error) {
 	dateStr := cutoff.Format("2006-01-02")
 	query := fmt.Sprintf("from:<@%s> after:%s", authInfo.UserID, dateStr)
 
-	// Extract unique channel IDs across all pages
+	return a.searchChannelIDs(query, 20)
+}
+
+// GetActiveChannelIDs returns channel IDs with messages in the last N days.
+func (a *API) GetActiveChannelIDs(days int) ([]string, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	query := fmt.Sprintf("after:%s", cutoff.Format("2006-01-02"))
+	return a.searchChannelIDs(query, 20)
+}
+
+func (a *API) searchChannelIDs(query string, maxPages int) ([]string, error) {
 	channelSet := make(map[string]bool)
 	page := 1
-	maxPages := 20 // Safety limit
 
 	for page <= maxPages {
 		result, err := a.SearchMessages(query, 100, page)
@@ -968,10 +977,11 @@ func (a *API) GetMyChannelIDs(days int) ([]string, error) {
 		}
 
 		for _, match := range result.Messages.Matches {
-			channelSet[match.Channel.ID] = true
+			if match.Channel.ID != "" {
+				channelSet[match.Channel.ID] = true
+			}
 		}
 
-		// Check if more pages
 		if page >= result.Messages.Pagination.PageCount || len(result.Messages.Matches) == 0 {
 			break
 		}
@@ -982,7 +992,6 @@ func (a *API) GetMyChannelIDs(days int) ([]string, error) {
 	for id := range channelSet {
 		channels = append(channels, id)
 	}
-
 	return channels, nil
 }
 
