@@ -24,8 +24,8 @@ Agent-native Slack CLI with local full-text search, sync, and messaging.
 ## Quick Start
 
 ```bash
-# Install
-go install github.com/maximilianwuehr/slacli/cmd/slack@latest
+# Keep the installed binary current
+slacli upgrade
 
 # Set credentials (see Setup section)
 export SLACLI_CLIENT_ID="your-client-id"
@@ -98,17 +98,19 @@ slacli messages search "deployment"
 
 ## Installation
 
+### From Binary
+
+Download from [Releases](https://github.com/maximilianwuehr-afk/slacli/releases).
+
+**Platforms:** Linux (amd64/arm64), macOS (amd64/arm64), Windows (amd64)
+
 ### From Source
 
 ```bash
-go install github.com/maximilianwuehr/slacli/cmd/slack@latest
+git clone https://github.com/maximilianwuehr-afk/slacli.git
+cd slacli
+go build -o slacli ./cmd/slack
 ```
-
-### From Binary
-
-Download from [Releases](https://github.com/maximilianwuehr/slacli/releases).
-
-**Platforms:** Linux (amd64/arm64), macOS (amd64/arm64), Windows (amd64)
 
 ## Setup
 
@@ -190,8 +192,9 @@ slacli sync --threads --active-days 7  # Fill recent thread replies
 ### Upgrade
 
 ```bash
-slacli upgrade                    # Install latest from GitHub
-slacli upgrade --ref v0.3.0       # Install a tag, branch, or commit
+slacli upgrade                    # Replace current install from latest GitHub release
+slacli upgrade --ref v0.3.0       # Install a tag release, or build from source if needed
+slacli upgrade --ref main         # Build and install the latest main checkout
 ```
 
 ### Channels
