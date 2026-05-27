@@ -99,6 +99,148 @@ func TestInstallBinaryReplacesTarget(t *testing.T) {
 	}
 }
 
+func TestInstallCandidateWritePathResolvesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, executableName("slack"))
+	link := filepath.Join(dir, executableName("slacli"))
+
+	if err := os.WriteFile(target, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+	if got := installCandidateWritePath(link); got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestWritablePathInstallTargetUsesEarlierPathDir(t *testing.T) {
+	earlyDir := t.TempDir()
+	currentDir := t.TempDir()
+	laterDir := t.TempDir()
+	t.Setenv("PATH", earlyDir+string(os.PathListSeparator)+currentDir+string(os.PathListSeparator)+laterDir)
+
+	got, ok := writablePathInstallTarget(executableName("slack"), filepath.Join(currentDir, executableName("slack")))
+	if !ok {
+		t.Fatal("expected writable PATH target")
+	}
+	want := filepath.Join(earlyDir, executableName("slack"))
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestWritablePathInstallTargetSkipsUnrelatedExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test is Unix-specific")
+	}
+
+	earlyDir := t.TempDir()
+	safeDir := t.TempDir()
+	currentDir := t.TempDir()
+	t.Setenv("PATH", earlyDir+string(os.PathListSeparator)+safeDir+string(os.PathListSeparator)+currentDir)
+
+	unrelated := filepath.Join(earlyDir, executableName("slack"))
+	if err := os.WriteFile(unrelated, []byte("#!/bin/sh\necho unrelated\n"), 0o755); err != nil {
+		t.Fatalf("write unrelated executable: %v", err)
+	}
+
+	got, ok := writablePathInstallTarget(executableName("slack"), filepath.Join(currentDir, executableName("slack")))
+	if !ok {
+		t.Fatal("expected writable PATH target")
+	}
+	want := filepath.Join(safeDir, executableName("slack"))
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestWritablePathInstallTargetStopsAtCurrentDir(t *testing.T) {
+	currentDir := t.TempDir()
+	laterDir := t.TempDir()
+	t.Setenv("PATH", currentDir+string(os.PathListSeparator)+laterDir)
+
+	if got, ok := writablePathInstallTarget(executableName("slack"), filepath.Join(currentDir, executableName("slack"))); ok {
+		t.Fatalf("expected no fallback before current dir, got %s", got)
+	}
+}
+
+func TestInstallTargetOnPath(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, executableName("slack"))
+	other := filepath.Join(t.TempDir(), executableName("slack"))
+	if err := os.WriteFile(target, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.WriteFile(other, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	if !installTargetOnPath(target) {
+		t.Fatal("expected PATH target to be detected")
+	}
+	if installTargetOnPath(other) {
+		t.Fatal("expected non-PATH target not to be detected")
+	}
+}
+
+func TestLooksLikeSlacli(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test is Unix-specific")
+	}
+
+	dir := t.TempDir()
+	slacliScript := filepath.Join(dir, "slack")
+	otherScript := filepath.Join(dir, "other")
+	if err := os.WriteFile(slacliScript, []byte("#!/bin/sh\necho 'slacli test-build'\n"), 0o755); err != nil {
+		t.Fatalf("write slacli script: %v", err)
+	}
+	if err := os.WriteFile(otherScript, []byte("#!/bin/sh\necho 'not this cli'\n"), 0o755); err != nil {
+		t.Fatalf("write other script: %v", err)
+	}
+
+	if !looksLikeSlacli(slacliScript) {
+		t.Fatal("expected script to look like slacli")
+	}
+	if looksLikeSlacli(otherScript) {
+		t.Fatal("expected unrelated script not to look like slacli")
+	}
+}
+
+func TestSafeUpgradeTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test is Unix-specific")
+	}
+
+	dir := t.TempDir()
+	missing := filepath.Join(dir, executableName("slack"))
+	slacliScript := filepath.Join(dir, "slacli-script")
+	otherScript := filepath.Join(dir, "other")
+	if err := os.WriteFile(slacliScript, []byte("#!/bin/sh\necho 'slacli test-build'\n"), 0o755); err != nil {
+		t.Fatalf("write slacli script: %v", err)
+	}
+	if err := os.WriteFile(otherScript, []byte("#!/bin/sh\necho 'not this cli'\n"), 0o755); err != nil {
+		t.Fatalf("write other script: %v", err)
+	}
+
+	if !safeUpgradeTarget(missing) {
+		t.Fatal("expected missing target to be safe")
+	}
+	if !safeUpgradeTarget(slacliScript) {
+		t.Fatal("expected slacli target to be safe")
+	}
+	if safeUpgradeTarget(otherScript) {
+		t.Fatal("expected unrelated target not to be safe")
+	}
+}
+
 func TestShouldTryRelease(t *testing.T) {
 	tests := []struct {
 		ref  string
