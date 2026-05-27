@@ -92,6 +92,11 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	if alias, err := ensureSlacliAlias(target.Path); err != nil {
 		output.Warn(fmt.Sprintf("Could not update slacli alias %s: %v", alias, err))
 	}
+	if installTargetOnPath(target.Path) {
+		for _, msg := range syncRelatedInstalls(target.Path) {
+			output.Info("%s", msg)
+		}
+	}
 
 	verified, err := verifyInstalledBinary(target.Path)
 	if err != nil {
@@ -103,7 +108,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	output.Info("Installed binary: %s", target.Path)
 	output.Info("Verified: %s", verified)
 	if target.Fallback {
-		output.Warn(fmt.Sprintf("Installed to %s because the current install directory was not writable; ensure %s is first in PATH", target.Path, filepath.Dir(target.Path)))
+		output.Info("Fallback target: %s", target.Reason)
 	}
 
 	return nil
@@ -155,6 +160,7 @@ func buildUpgradeFromSource(ref, outputPath, tmpDir string) (string, error) {
 type installTarget struct {
 	Path     string
 	Fallback bool
+	Reason   string
 }
 
 func upgradeInstallTarget() (installTarget, error) {
@@ -164,7 +170,14 @@ func upgradeInstallTarget() (installTarget, error) {
 		if directoryWritable(filepath.Dir(target)) {
 			return installTarget{Path: target}, nil
 		}
-		output.Warn(fmt.Sprintf("Current install directory is not writable: %s", filepath.Dir(target)))
+		output.Info("Current install directory is not writable: %s", filepath.Dir(target))
+		if pathTarget, ok := writablePathInstallTarget(executableName("slack"), current); ok {
+			return installTarget{
+				Path:     pathTarget,
+				Fallback: true,
+				Reason:   "using an earlier writable PATH directory",
+			}, nil
+		}
 	}
 
 	fallbackPath, err := userBinPath(executableName("slack"))
@@ -177,7 +190,11 @@ func upgradeInstallTarget() (installTarget, error) {
 	if !directoryWritable(filepath.Dir(fallbackPath)) {
 		return installTarget{}, fmt.Errorf("fallback install directory is not writable: %s", filepath.Dir(fallbackPath))
 	}
-	return installTarget{Path: fallbackPath, Fallback: true}, nil
+	return installTarget{
+		Path:     fallbackPath,
+		Fallback: true,
+		Reason:   "using Go user bin fallback",
+	}, nil
 }
 
 func gitCommit(dir string) (string, error) {
@@ -236,6 +253,37 @@ func directoryWritable(dir string) bool {
 	_ = f.Close()
 	_ = os.Remove(name)
 	return true
+}
+
+func writablePathInstallTarget(binary, currentPath string) (string, bool) {
+	currentDir := filepath.Dir(currentPath)
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		if samePath(dir, currentDir) {
+			return "", false
+		}
+		candidate := filepath.Join(dir, binary)
+		if !safeUpgradeTarget(candidate) {
+			continue
+		}
+		if directoryWritable(dir) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func safeUpgradeTarget(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return looksLikeSlacli(path)
 }
 
 func userBinPath(binary string) (string, error) {
@@ -482,6 +530,110 @@ func ensureSlacliAlias(targetPath string) (string, error) {
 	return aliasPath, os.Symlink(linkTarget, aliasPath)
 }
 
+func syncRelatedInstalls(targetPath string) []string {
+	seen := map[string]bool{}
+	messages := []string{}
+
+	for _, candidate := range slacliInstallCandidates() {
+		absCandidate, err := filepath.Abs(candidate)
+		if err != nil {
+			absCandidate = candidate
+		}
+		writePath := installCandidateWritePath(absCandidate)
+		if seen[writePath] {
+			continue
+		}
+		seen[writePath] = true
+
+		if samePath(writePath, targetPath) || sameExecutable(writePath, targetPath) {
+			continue
+		}
+		if !looksLikeSlacli(absCandidate) {
+			continue
+		}
+		if !directoryWritable(filepath.Dir(writePath)) {
+			messages = append(messages, fmt.Sprintf("Skipped stale install %s (directory not writable)", writePath))
+			continue
+		}
+
+		if filepath.Base(writePath) == executableName("slacli") && samePath(filepath.Dir(writePath), filepath.Dir(targetPath)) {
+			if alias, err := ensureSlacliAlias(targetPath); err == nil {
+				messages = append(messages, fmt.Sprintf("Updated alias: %s", alias))
+			} else {
+				messages = append(messages, fmt.Sprintf("Could not update alias %s: %v", writePath, err))
+			}
+			continue
+		}
+
+		if err := installBinary(targetPath, writePath); err != nil {
+			messages = append(messages, fmt.Sprintf("Could not update related install %s: %v", writePath, err))
+			continue
+		}
+		messages = append(messages, fmt.Sprintf("Updated related install: %s", writePath))
+	}
+
+	return messages
+}
+
+func installTargetOnPath(targetPath string) bool {
+	for _, candidate := range slacliInstallCandidates() {
+		if samePath(candidate, targetPath) || sameExecutable(candidate, targetPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func installCandidateWritePath(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return path
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
+}
+
+func slacliInstallCandidates() []string {
+	candidates := []string{}
+	for _, name := range []string{executableName("slack"), executableName("slacli")} {
+		candidates = append(candidates, pathExecutableCandidates(name)...)
+		if userPath, err := userBinPath(name); err == nil {
+			candidates = append(candidates, userPath)
+		}
+	}
+	return candidates
+}
+
+func pathExecutableCandidates(name string) []string {
+	candidates := []string{}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		candidates = append(candidates, path)
+	}
+	return candidates
+}
+
+func looksLikeSlacli(path string) bool {
+	out, err := exec.Command(path, "version").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), "slacli")
+}
+
 func samePath(a, b string) bool {
 	aAbs, aErr := filepath.Abs(a)
 	bAbs, bErr := filepath.Abs(b)
@@ -511,13 +663,21 @@ func copyFile(sourcePath, targetPath string, mode os.FileMode) error {
 }
 
 func verifyInstalledBinary(binaryPath string) (string, error) {
-	out, err := exec.Command(binaryPath, "version").CombinedOutput()
-	text := strings.TrimSpace(string(out))
+	text, err := slacliVersionOutput(binaryPath)
 	if err != nil {
-		return "", fmt.Errorf("verify installed binary: %w: %s", err, text)
+		return "", fmt.Errorf("verify installed binary: %w", err)
 	}
 	if !strings.Contains(text, "slacli") {
 		return "", fmt.Errorf("verify installed binary: unexpected version output %q", text)
+	}
+	return text, nil
+}
+
+func slacliVersionOutput(binaryPath string) (string, error) {
+	out, err := exec.Command(binaryPath, "version").CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		return text, fmt.Errorf("%w: %s", err, text)
 	}
 	return text, nil
 }

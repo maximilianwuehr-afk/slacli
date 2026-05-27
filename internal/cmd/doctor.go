@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -35,6 +39,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		configCheck.Message = cfg.StoreDir
 	}
 	checks = append(checks, configCheck)
+
+	checks = append(checks, executableDoctorChecks()...)
 
 	// Check 2: Auth status
 	authCheck := output.DoctorCheck{
@@ -115,4 +121,133 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	output.Print(output.DoctorResult{Checks: checks})
 	return nil
+}
+
+func executableDoctorChecks() []output.DoctorCheck {
+	checks := []output.DoctorCheck{}
+
+	current, err := os.Executable()
+	if err != nil || current == "" {
+		return []output.DoctorCheck{{
+			Name:    "CLI executable",
+			Status:  "warning",
+			Message: "Could not determine current executable",
+		}}
+	}
+
+	target := executableInstallTarget(current)
+	version, versionErr := slacliVersionOutput(target)
+	execCheck := output.DoctorCheck{
+		Name:   "CLI executable",
+		Status: "ok",
+	}
+	if versionErr != nil {
+		execCheck.Status = "error"
+		execCheck.Message = fmt.Sprintf("%s (%v)", target, versionErr)
+	} else {
+		execCheck.Message = fmt.Sprintf("%s (%s)", target, version)
+	}
+	checks = append(checks, execCheck)
+
+	checks = append(checks, slacliAliasDoctorCheck(target))
+	checks = append(checks, pathResolutionDoctorCheck(target))
+	checks = append(checks, duplicateInstallsDoctorCheck(target, version))
+	return checks
+}
+
+func slacliAliasDoctorCheck(target string) output.DoctorCheck {
+	aliasPath := filepath.Join(filepath.Dir(target), executableName("slacli"))
+	check := output.DoctorCheck{
+		Name:   "CLI symlink",
+		Status: "ok",
+	}
+	if samePath(aliasPath, target) {
+		check.Message = "Current executable is slacli"
+		return check
+	}
+	if sameExecutable(aliasPath, target) {
+		check.Message = fmt.Sprintf("%s -> %s", aliasPath, target)
+		return check
+	}
+
+	check.Status = "warning"
+	if _, err := os.Lstat(aliasPath); os.IsNotExist(err) {
+		check.Message = fmt.Sprintf("%s missing (run: slacli upgrade)", aliasPath)
+	} else {
+		check.Message = fmt.Sprintf("%s does not resolve to %s (run: slacli upgrade)", aliasPath, target)
+	}
+	return check
+}
+
+func pathResolutionDoctorCheck(target string) output.DoctorCheck {
+	check := output.DoctorCheck{
+		Name:   "CLI PATH",
+		Status: "ok",
+	}
+	path, err := exec.LookPath(executableName("slacli"))
+	if err != nil {
+		check.Status = "warning"
+		check.Message = "slacli not found on PATH"
+		return check
+	}
+	if !sameExecutable(path, target) {
+		check.Status = "warning"
+		check.Message = fmt.Sprintf("PATH resolves slacli to %s, current target is %s", path, target)
+		return check
+	}
+	check.Message = fmt.Sprintf("slacli resolves to %s", path)
+	return check
+}
+
+func duplicateInstallsDoctorCheck(target, currentVersion string) output.DoctorCheck {
+	check := output.DoctorCheck{
+		Name:   "CLI installs",
+		Status: "ok",
+	}
+
+	type installInfo struct {
+		path    string
+		version string
+	}
+	installs := []installInfo{}
+	seen := map[string]bool{}
+	for _, candidate := range slacliInstallCandidates() {
+		absCandidate, err := filepath.Abs(candidate)
+		if err != nil {
+			absCandidate = candidate
+		}
+		if seen[absCandidate] {
+			continue
+		}
+		seen[absCandidate] = true
+		if !looksLikeSlacli(absCandidate) {
+			continue
+		}
+		version, err := slacliVersionOutput(absCandidate)
+		if err != nil {
+			version = "unhealthy: " + err.Error()
+		}
+		installs = append(installs, installInfo{path: absCandidate, version: version})
+	}
+
+	if len(installs) == 0 {
+		check.Status = "warning"
+		check.Message = "No slacli/slack executable found on PATH"
+		return check
+	}
+
+	stale := []string{}
+	for _, install := range installs {
+		if currentVersion != "" && install.version != currentVersion {
+			stale = append(stale, fmt.Sprintf("%s (%s)", install.path, install.version))
+		}
+	}
+	if len(stale) > 0 {
+		check.Status = "warning"
+		check.Message = fmt.Sprintf("Version mismatch; current target %s is %s; stale: %s", target, currentVersion, strings.Join(stale, "; "))
+		return check
+	}
+
+	check.Message = fmt.Sprintf("%d slacli/slack PATH entries match %s", len(installs), currentVersion)
+	return check
 }
