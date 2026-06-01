@@ -6,14 +6,15 @@ Agent-native Slack CLI with local full-text search, sync, and messaging.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  slacli                                                              │
 │  ├── sync ──────► Slack API ──────► SQLite + FTS5                   │
-│  ├── search ────► Local FTS5 ─────► Results                         │
+│  ├── search ────► Local FTS5 + Slack API ─► Merged results          │
 │  └── send ──────► Slack API ──────► Message posted                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
-- **Local Full-Text Search** — SQLite FTS5 indexes all synced messages for instant offline search
+- **Hybrid Search** — Local SQLite FTS5 and Slack API search run in parallel, then merge and dedupe
+- **Local Full-Text Search** — SQLite FTS5 indexes synced messages for instant offline search
 - **Cursor-Based Sync** — Efficient incremental sync; only fetches new messages
 - **Fast Sync Mode** — `--my-channels` uses Slack search API to sync only channels you've posted in
 - **Agent-Friendly** — `--json` output for LLM/agent consumption
@@ -38,7 +39,7 @@ slacli auth
 slacli sync --my-channels
 
 # Search
-slacli messages search "deployment"
+slacli search "deployment"
 ```
 
 ## Architecture
@@ -180,6 +181,7 @@ slacli auth --logout     # Clear credentials
 slacli sync                       # Incremental sync
 slacli sync --full                # Full re-sync (reset cursors)
 slacli sync --my-channels         # Fast: only channels you've posted in
+slacli sync --recent --days 7     # Incrementally sync recently active channels
 slacli sync --days 60             # Sync 60 days of history
 slacli sync --active-days 7       # Fast: active channel messages
 slacli sync --channels-only       # Sync channel metadata only
@@ -211,6 +213,22 @@ slacli channels list --limit 10            # Top 10
 slacli channels list --json                # JSON output
 ```
 
+### Search
+
+```bash
+slacli search "deployment"             # Hybrid local + live search
+slacli search --local "deployment"     # Local index only, no network
+slacli search --live "deployment"      # Slack API only
+slacli search "bug" --channel "#eng"   # Scope to channel
+slacli search "review" --from alice@example.com
+```
+
+Search never runs inline sync. If the local index is stale, run:
+
+```bash
+slacli sync --recent --days 7
+```
+
 ### Messages
 
 **List:**
@@ -224,7 +242,9 @@ slacli messages list --channel "#general" --thread 1704540600.123456  # Thread
 
 **Search:**
 ```bash
-slacli messages search "deployment"                       # All messages
+slacli messages search "deployment"                       # Hybrid local + live search
+slacli messages search --local "deployment"               # Local index only
+slacli messages search --live "deployment"                # Slack API only
 slacli messages search "bug" --channel "#engineering"    # In channel
 slacli messages search "review" --from alice@company.com  # From user
 slacli messages search "api" --after 2024-01-01          # After date

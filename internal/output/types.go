@@ -34,6 +34,7 @@ type Message struct {
 	ReplyCount  int        `json:"reply_count"`
 	Reactions   []Reaction `json:"reactions,omitempty"`
 	Edited      bool       `json:"edited"`
+	Source      string     `json:"source,omitempty"`
 }
 
 // Reaction represents a message reaction
@@ -45,6 +46,23 @@ type Reaction struct {
 // MessageListResult is the output for message commands
 type MessageListResult struct {
 	Messages []Message `json:"messages"`
+}
+
+// SearchTimings captures search branch and merge durations.
+type SearchTimings struct {
+	Local    string `json:"local,omitempty"`
+	Live     string `json:"live,omitempty"`
+	Merge    string `json:"merge,omitempty"`
+	IndexAge string `json:"index_age,omitempty"`
+}
+
+// SearchResult is the output for hybrid/local/live search.
+type SearchResult struct {
+	Messages            []Message     `json:"messages"`
+	Mode                string        `json:"mode"`
+	LocalIndexFreshness string        `json:"local_index_freshness,omitempty"`
+	Warnings            []string      `json:"warnings,omitempty"`
+	Timings             SearchTimings `json:"timings"`
 }
 
 // User represents a Slack user

@@ -83,6 +83,7 @@ func init() {
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(channelsCmd)
 	rootCmd.AddCommand(messagesCmd)
 	rootCmd.AddCommand(mentionsCmd)

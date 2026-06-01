@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -12,13 +11,6 @@ import (
 	"slacli/internal/output"
 	"slacli/internal/slack"
 	"slacli/internal/sync"
-)
-
-const (
-	// Auto-sync if last sync was more than this long ago
-	// Since sync now only fetches channels with actual changes (unread or activity),
-	// we can run it more frequently without API overhead
-	autoSyncStaleThreshold = 5 * time.Minute
 )
 
 var messagesCmd = &cobra.Command{
@@ -34,7 +26,7 @@ var messagesListCmd = &cobra.Command{
 
 var messagesSearchCmd = &cobra.Command{
 	Use:   "search <query>",
-	Short: "Search messages using full-text search",
+	Short: "Search messages using local index and Slack API",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runMessagesSearch,
 }
@@ -106,6 +98,8 @@ var (
 	msgSearchAfter   string
 	msgSearchBefore  string
 	msgSearchLimit   int
+	msgSearchLocal   bool
+	msgSearchLive    bool
 
 	// Context flags
 	msgContextBefore int
@@ -139,6 +133,8 @@ func init() {
 	messagesSearchCmd.Flags().StringVar(&msgSearchAfter, "after", "", "messages after date (YYYY-MM-DD)")
 	messagesSearchCmd.Flags().StringVar(&msgSearchBefore, "before", "", "messages before date")
 	messagesSearchCmd.Flags().IntVar(&msgSearchLimit, "limit", 50, "max results")
+	messagesSearchCmd.Flags().BoolVar(&msgSearchLocal, "local", false, "search local index only")
+	messagesSearchCmd.Flags().BoolVar(&msgSearchLive, "live", false, "search Slack API only")
 
 	// Context flags
 	messagesContextCmd.Flags().IntVar(&msgContextBefore, "before", 5, "messages before")
@@ -176,84 +172,15 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 }
 
 func runMessagesSearch(cmd *cobra.Command, args []string) error {
-	cfg := config.Get()
-	query := args[0]
-
-	// Auto-sync if stale
-	if err := autoSyncIfStale(cfg); err != nil {
-		output.Debug("Auto-sync failed: %v", err)
-		// Continue with search even if sync fails
-	}
-
-	store, err := db.Open(cfg)
-	if err != nil {
-		return fmt.Errorf("database error: %w", err)
-	}
-	defer func() { _ = store.Close() }()
-
-	opts := db.SearchOptions{
-		Query:   query,
-		Channel: msgSearchChannel,
-		From:    msgSearchFrom,
-		After:   msgSearchAfter,
-		Before:  msgSearchBefore,
-		Limit:   msgSearchLimit,
-	}
-
-	messages, err := store.SearchMessages(opts)
-	if err != nil {
-		return fmt.Errorf("search: %w", err)
-	}
-
-	output.Print(output.MessageListResult{Messages: messages})
-	return nil
-}
-
-// autoSyncIfStale runs a quick sync if the last sync was too long ago
-func autoSyncIfStale(cfg *config.Config) error {
-	state, err := db.LoadSyncState(cfg)
-	if err != nil {
-		// No sync state = never synced, but don't auto-sync on first run
-		// User should run `slack sync` explicitly first
-		return nil
-	}
-
-	if state.LastSync == "" {
-		return nil
-	}
-
-	lastSync, err := time.Parse(time.RFC3339, state.LastSync)
-	if err != nil {
-		return nil
-	}
-
-	if time.Since(lastSync) < autoSyncStaleThreshold {
-		// Recently synced, skip
-		return nil
-	}
-
-	// Stale, run quick sync
-	output.Info("Auto-syncing (last sync: %s ago)...", time.Since(lastSync).Round(time.Second))
-
-	client, err := auth.GetClient(cfg)
-	if err != nil {
-		return fmt.Errorf("auth: %w", err)
-	}
-
-	syncer := sync.New(cfg, client)
-	result, err := syncer.Run(sync.Options{
-		MyChannels: true,
-		Days:       cfg.SyncDays,
+	return runSearch(args[0], searchCLIOptions{
+		Channel:   msgSearchChannel,
+		From:      msgSearchFrom,
+		After:     msgSearchAfter,
+		Before:    msgSearchBefore,
+		Limit:     msgSearchLimit,
+		LocalOnly: msgSearchLocal,
+		LiveOnly:  msgSearchLive,
 	})
-	if err != nil {
-		return err
-	}
-
-	if result.MessagesSynced > 0 {
-		output.Info("Synced %d new messages", result.MessagesSynced)
-	}
-
-	return nil
 }
 
 func runMessagesContext(cmd *cobra.Command, args []string) error {

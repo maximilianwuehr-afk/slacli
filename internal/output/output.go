@@ -69,6 +69,13 @@ func printPlain(v interface{}) {
 		for _, msg := range val.Messages {
 			fmt.Printf("%s\t%s\t%s\t%s\n", msg.ID, msg.Timestamp, msg.AuthorEmail, msg.Text)
 		}
+	case SearchResult:
+		if val.LocalIndexFreshness != "" {
+			fmt.Printf("# local_index_freshness\t%s\n", val.LocalIndexFreshness)
+		}
+		for _, msg := range val.Messages {
+			fmt.Printf("%s\t%s\t%s\t%s\t%s\n", msg.ID, msg.Timestamp, msg.Source, msg.AuthorEmail, msg.Text)
+		}
 	case UserListResult:
 		for _, u := range val.Users {
 			fmt.Printf("%s\t%s\t%s\n", u.ID, u.Email, u.Name)
@@ -94,6 +101,8 @@ func printFormatted(v interface{}) {
 		printChannelList(val)
 	case MessageListResult:
 		printMessageList(val)
+	case SearchResult:
+		printSearchResult(val)
 	case UserListResult:
 		printUserList(val)
 	case DraftListResult:
@@ -155,6 +164,55 @@ func printMessageList(r MessageListResult) {
 			fmt.Printf("\033[90m%s\033[0m \033[1m%s\033[0m\n", timestamp, author)
 		} else {
 			fmt.Printf("%s %s\n", timestamp, author)
+		}
+		fmt.Println(msg.Text)
+		if msg.ReplyCount > 0 {
+			fmt.Printf("  └─ %d replies\n", msg.ReplyCount)
+		}
+		fmt.Println()
+	}
+}
+
+func printSearchResult(r SearchResult) {
+	if r.LocalIndexFreshness != "" {
+		fmt.Printf("Local index: %s\n", r.LocalIndexFreshness)
+	}
+	for _, warning := range r.Warnings {
+		fmt.Printf("Warning: %s\n", warning)
+	}
+	if r.LocalIndexFreshness != "" || len(r.Warnings) > 0 {
+		fmt.Println()
+	}
+
+	if len(r.Messages) == 0 {
+		fmt.Println("No messages found")
+		return
+	}
+
+	for _, msg := range r.Messages {
+		timestamp := formatTime(msg.Timestamp)
+		author := msg.AuthorName
+		if author == "" {
+			author = msg.AuthorEmail
+		}
+		if author == "" {
+			author = msg.AuthorID
+		}
+		channel := msg.ChannelName
+		if channel != "" {
+			channel = "#" + channel
+		} else {
+			channel = msg.ChannelID
+		}
+		source := msg.Source
+		if source == "" {
+			source = "unknown"
+		}
+
+		if !opts.NoColor {
+			fmt.Printf("\033[90m%s\033[0m \033[1m%s\033[0m %s [%s]\n", timestamp, author, channel, source)
+		} else {
+			fmt.Printf("%s %s %s [%s]\n", timestamp, author, channel, source)
 		}
 		fmt.Println(msg.Text)
 		if msg.ReplyCount > 0 {

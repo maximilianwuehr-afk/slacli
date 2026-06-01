@@ -24,6 +24,7 @@ var (
 	syncDays         int
 	syncActiveDays   int
 	syncMyChannels   bool
+	syncRecent       bool
 	syncFollow       bool
 	syncThreads      bool
 	syncChannel      string
@@ -35,6 +36,7 @@ func init() {
 	syncCmd.Flags().IntVar(&syncDays, "days", 30, "sync last N days of messages")
 	syncCmd.Flags().IntVar(&syncActiveDays, "active-days", 0, "only sync channels active in last N days (0=all)")
 	syncCmd.Flags().BoolVar(&syncMyChannels, "my-channels", false, "only sync channels where you've posted (uses search API)")
+	syncCmd.Flags().BoolVar(&syncRecent, "recent", false, "incrementally sync recently active channels")
 	syncCmd.Flags().BoolVar(&syncFollow, "follow", false, "continuous sync loop")
 	syncCmd.Flags().BoolVar(&syncThreads, "threads", false, "fill missing thread replies (use --full to force resync)")
 	syncCmd.Flags().StringVar(&syncChannel, "channel", "", "only sync specific channel (name or ID)")
@@ -58,6 +60,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 		Follow:       syncFollow,
 		Threads:      syncThreads,
 		Channel:      syncChannel,
+	}
+	if syncRecent && opts.ActiveDays == 0 {
+		opts.ActiveDays = syncDays
 	}
 
 	syncer := sync.New(cfg, client)

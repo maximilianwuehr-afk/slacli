@@ -2,6 +2,7 @@ package slack
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -831,6 +832,11 @@ func (a *API) SendDraft(draftID string) (output.SendResult, error) {
 
 // SearchMessages searches for messages matching a query
 func (a *API) SearchMessages(query string, count, page int) (*SearchResponse, error) {
+	return a.SearchMessagesContext(context.Background(), query, count, page)
+}
+
+// SearchMessagesContext searches for messages matching a query using the supplied context.
+func (a *API) SearchMessagesContext(ctx context.Context, query string, count, page int) (*SearchResponse, error) {
 	params := url.Values{
 		"query": {query},
 		"count": {strconv.Itoa(count)},
@@ -838,7 +844,7 @@ func (a *API) SearchMessages(query string, count, page int) (*SearchResponse, er
 		"sort":  {"timestamp"},
 	}
 
-	resp, err := a.get("search.messages", params)
+	resp, err := a.getContext(ctx, "search.messages", params)
 	if err != nil {
 		return nil, err
 	}
@@ -876,8 +882,10 @@ type SearchMatch struct {
 		Name string `json:"name"`
 	} `json:"channel"`
 	User      string `json:"user"`
+	Username  string `json:"username"`
 	Text      string `json:"text"`
 	TS        string `json:"ts"`
+	ThreadTS  string `json:"thread_ts"`
 	Permalink string `json:"permalink"`
 }
 
@@ -1387,11 +1395,16 @@ func (a *API) GetUserInfo(userID string) (*UserInfo, error) {
 
 // GetUserByEmail looks up a user by email address
 func (a *API) GetUserByEmail(email string) (*UserInfo, error) {
+	return a.GetUserByEmailContext(context.Background(), email)
+}
+
+// GetUserByEmailContext looks up a user by email address using the supplied context.
+func (a *API) GetUserByEmailContext(ctx context.Context, email string) (*UserInfo, error) {
 	params := url.Values{
 		"email": {email},
 	}
 
-	resp, err := a.get("users.lookupByEmail", params)
+	resp, err := a.getContext(ctx, "users.lookupByEmail", params)
 	if err != nil {
 		return nil, err
 	}
@@ -1486,6 +1499,10 @@ func (a *API) SetUserPresence(presence string) error {
 // ============================================================================
 
 func (a *API) get(method string, params url.Values) ([]byte, error) {
+	return a.getContext(context.Background(), method, params)
+}
+
+func (a *API) getContext(ctx context.Context, method string, params url.Values) ([]byte, error) {
 	u := baseURL + "/" + method
 	if params != nil {
 		u += "?" + params.Encode()
@@ -1493,7 +1510,12 @@ func (a *API) get(method string, params url.Values) ([]byte, error) {
 
 	a.rateLimiter.wait()
 
-	resp, err := a.client.Get(u)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1503,11 +1525,15 @@ func (a *API) get(method string, params url.Values) ([]byte, error) {
 	if resp.StatusCode == 429 {
 		retryAfter := resp.Header.Get("Retry-After")
 		if secs, err := strconv.Atoi(retryAfter); err == nil {
-			time.Sleep(time.Duration(secs) * time.Second)
-			return a.get(method, params)
+			if err := sleepContext(ctx, time.Duration(secs)*time.Second); err != nil {
+				return nil, err
+			}
+			return a.getContext(ctx, method, params)
 		}
-		time.Sleep(time.Second)
-		return a.get(method, params)
+		if err := sleepContext(ctx, time.Second); err != nil {
+			return nil, err
+		}
+		return a.getContext(ctx, method, params)
 	}
 
 	return io.ReadAll(resp.Body)
@@ -1569,4 +1595,28 @@ func (r *rateLimiter) wait() {
 		time.Sleep(r.minDelay - elapsed)
 	}
 	r.lastCall = time.Now()
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// TimestampToRFC3339 converts a Slack timestamp like "1234567890.123456" to RFC3339.
+func TimestampToRFC3339(ts string) string {
+	parts := strings.Split(ts, ".")
+	if len(parts) == 0 {
+		return ts
+	}
+	sec, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return ts
+	}
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }

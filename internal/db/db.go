@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -363,6 +364,11 @@ type SearchOptions struct {
 
 // SearchMessages performs full-text search
 func (s *Store) SearchMessages(opts SearchOptions) ([]output.Message, error) {
+	return s.SearchMessagesContext(context.Background(), opts)
+}
+
+// SearchMessagesContext performs full-text search using the supplied context.
+func (s *Store) SearchMessagesContext(ctx context.Context, opts SearchOptions) ([]output.Message, error) {
 	query := `SELECT m.id, m.channel_id, COALESCE(c.name, ''), COALESCE(m.author_id, ''),
 		COALESCE(m.author_email, ''), COALESCE(m.author_name, ''),
 		COALESCE(m.text, ''), m.timestamp, COALESCE(m.thread_ts, ''),
@@ -406,7 +412,7 @@ func (s *Store) SearchMessages(opts SearchOptions) ([]output.Message, error) {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
 	}
 
-	return s.queryMessages(query, args...)
+	return s.queryMessagesContext(ctx, query, args...)
 }
 
 // MentionOptions for getting mentions
@@ -733,7 +739,11 @@ func (s *Store) resolveChannel(channel string) (string, error) {
 }
 
 func (s *Store) queryMessages(query string, args ...interface{}) ([]output.Message, error) {
-	rows, err := s.db.Query(query, args...)
+	return s.queryMessagesContext(context.Background(), query, args...)
+}
+
+func (s *Store) queryMessagesContext(ctx context.Context, query string, args ...interface{}) ([]output.Message, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

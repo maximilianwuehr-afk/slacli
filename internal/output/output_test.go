@@ -92,6 +92,56 @@ func TestMessageListResult_JSONSchema(t *testing.T) {
 	}
 }
 
+func TestSearchResult_JSONSchema(t *testing.T) {
+	result := SearchResult{
+		Messages: []Message{
+			{
+				ID:          "1704540600.123456",
+				ChannelID:   "C123456",
+				ChannelName: "general",
+				AuthorID:    "U123456",
+				AuthorEmail: "user@example.com",
+				AuthorName:  "Test User",
+				Text:        "Hello world",
+				Timestamp:   "2025-01-06T10:30:00Z",
+				ReplyCount:  3,
+				Edited:      false,
+				Source:      "local+live",
+			},
+		},
+		Mode:                "hybrid",
+		LocalIndexFreshness: "3d old",
+		Timings: SearchTimings{
+			Local:    "20ms",
+			Live:     "200ms",
+			Merge:    "1ms",
+			IndexAge: "72h0m0s",
+		},
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	for _, field := range []string{"messages", "mode", "local_index_freshness", "timings"} {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("Missing required field: %s", field)
+		}
+	}
+
+	messages := parsed["messages"].([]interface{})
+	msg := messages[0].(map[string]interface{})
+	if msg["source"] != "local+live" {
+		t.Errorf("Expected source label, got %v", msg["source"])
+	}
+}
+
 func TestUserListResult_JSONSchema(t *testing.T) {
 	result := UserListResult{
 		Users: []User{

@@ -274,6 +274,11 @@ func Status(cfg *config.Config) (output.AuthStatus, error) {
 
 // Refresh refreshes the access token
 func Refresh(cfg *config.Config) error {
+	return RefreshContext(context.Background(), cfg)
+}
+
+// RefreshContext refreshes the access token using the supplied context.
+func RefreshContext(ctx context.Context, cfg *config.Config) error {
 	creds, err := LoadCredentials(cfg)
 	if err != nil {
 		return fmt.Errorf("load credentials: %w", err)
@@ -302,7 +307,8 @@ func Refresh(cfg *config.Config) error {
 		RefreshToken: creds.RefreshToken,
 	}
 
-	newToken, err := oauthConfig.TokenSource(context.Background(), token).Token()
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: 30 * time.Second})
+	newToken, err := oauthConfig.TokenSource(ctx, token).Token()
 	if err != nil {
 		return fmt.Errorf("refresh token: %w", err)
 	}
@@ -320,6 +326,11 @@ func Refresh(cfg *config.Config) error {
 
 // GetClient returns an authenticated HTTP client
 func GetClient(cfg *config.Config) (*http.Client, error) {
+	return GetClientContext(context.Background(), cfg, 30*time.Second)
+}
+
+// GetClientContext returns an authenticated HTTP client with the given request timeout.
+func GetClientContext(ctx context.Context, cfg *config.Config, timeout time.Duration) (*http.Client, error) {
 	creds, err := LoadCredentials(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("not authenticated: %w", err)
@@ -327,7 +338,7 @@ func GetClient(cfg *config.Config) (*http.Client, error) {
 
 	if creds.IsExpired() {
 		// Try to refresh
-		if err := Refresh(cfg); err != nil {
+		if err := RefreshContext(ctx, cfg); err != nil {
 			return nil, fmt.Errorf("token expired and refresh failed: %w", err)
 		}
 		// Reload credentials
@@ -337,13 +348,17 @@ func GetClient(cfg *config.Config) (*http.Client, error) {
 		}
 	}
 
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
 	// Create client with auth header
 	return &http.Client{
 		Transport: &authTransport{
 			token: creds.AccessToken,
 			base:  http.DefaultTransport,
 		},
-		Timeout: 30 * time.Second,
+		Timeout: timeout,
 	}, nil
 }
 
