@@ -559,7 +559,7 @@ func (s *Store) ListUsers(opts UserListOptions) ([]output.User, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var users []output.User
+	users := make([]output.User, 0)
 	for rows.Next() {
 		var u output.User
 		err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.DisplayName, &u.AvatarURL, &u.IsBot)

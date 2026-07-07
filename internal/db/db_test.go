@@ -133,6 +133,22 @@ func TestListChannels_WithData(t *testing.T) {
 	}
 }
 
+func TestListUsers_EmptyReturnsEmptySlice(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	users, err := store.ListUsers(UserListOptions{Search: "alice", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListUsers failed: %v", err)
+	}
+	if users == nil {
+		t.Fatal("expected empty slice, got nil")
+	}
+	if len(users) != 0 {
+		t.Fatalf("expected 0 users, got %d", len(users))
+	}
+}
+
 func TestSearchMessages_FTS(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
