@@ -189,8 +189,13 @@ func (c *ChannelInfo) GetChannelType() string {
 	return "channel"
 }
 
-// ListUsers returns all users
+// ListUsers returns all users.
 func (a *API) ListUsers(cursor string) (*UsersResponse, error) {
+	return a.ListUsersContext(context.Background(), cursor)
+}
+
+// ListUsersContext returns all users using the supplied context.
+func (a *API) ListUsersContext(ctx context.Context, cursor string) (*UsersResponse, error) {
 	params := url.Values{
 		"limit": {"200"},
 	}
@@ -198,7 +203,7 @@ func (a *API) ListUsers(cursor string) (*UsersResponse, error) {
 		params.Set("cursor", cursor)
 	}
 
-	resp, err := a.get("users.list", params)
+	resp, err := a.getContext(ctx, "users.list", params)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +216,64 @@ func (a *API) ListUsers(cursor string) (*UsersResponse, error) {
 		return nil, fmt.Errorf("users.list: %s", result.Error)
 	}
 	return &result, nil
+}
+
+// SearchUsers returns workspace users matching query.
+func (a *API) SearchUsers(query string, limit int) ([]UserInfo, error) {
+	return a.SearchUsersContext(context.Background(), query, limit)
+}
+
+// SearchUsersContext returns workspace users matching query using users.list.
+func (a *API) SearchUsersContext(ctx context.Context, query string, limit int) ([]UserInfo, error) {
+	query = strings.TrimSpace(strings.TrimPrefix(query, "@"))
+	if query == "" {
+		return nil, fmt.Errorf("query required")
+	}
+
+	users := make([]UserInfo, 0)
+	cursor := ""
+	for {
+		resp, err := a.ListUsersContext(ctx, cursor)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, user := range resp.Members {
+			if user.Deleted {
+				continue
+			}
+			if userMatchesQuery(user, query) {
+				users = append(users, user)
+				if limit > 0 && len(users) >= limit {
+					return users, nil
+				}
+			}
+		}
+
+		cursor = resp.ResponseMetadata.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+
+	return users, nil
+}
+
+func userMatchesQuery(user UserInfo, query string) bool {
+	needle := strings.ToLower(query)
+	fields := []string{
+		user.ID,
+		user.Name,
+		user.RealName,
+		user.Profile.DisplayName,
+		user.Profile.Email,
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // UsersResponse is the response from users.list

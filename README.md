@@ -341,6 +341,9 @@ slacli drafts delete <draft-id>                       # Delete draft
 ```bash
 slacli users list                    # All users
 slacli users list --search "alice"   # Search by name/email
+slacli users search "alice"          # Search Slack live
+slacli users search "alice" --local  # Search synced local users
+slacli users search "alice" --limit 10
 slacli users list --json             # JSON output
 ```
 

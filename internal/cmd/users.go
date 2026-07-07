@@ -19,6 +19,7 @@ var usersCmd = &cobra.Command{
 
 Examples:
   slack users list
+  slack users search alice
   slack users info U12345ABC
   slack users lookup alice@company.com
   slack users presence @alice`,
@@ -36,6 +37,22 @@ Examples:
   slack users list --search "alice"
   slack users list --json`,
 	RunE: runUsersList,
+}
+
+var usersSearchCmd = &cobra.Command{
+	Use:   "search <query>",
+	Short: "Search workspace users",
+	Long: `Search workspace users by name, display name, real name, email, or user ID.
+
+By default this searches Slack live. Use --local to search the synced local database.
+
+Examples:
+  slack users search alice
+  slack users search alice --limit 10
+  slack users search alice --local
+  slack users search alice --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runUsersSearch,
 }
 
 var usersInfoCmd = &cobra.Command{
@@ -87,19 +104,25 @@ Examples:
 }
 
 var (
-	usersSearch string
-	usersLimit  int
-	presenceSet string
+	usersSearch      string
+	usersLimit       int
+	usersSearchLimit int
+	usersSearchLocal bool
+	presenceSet      string
 )
 
 func init() {
 	usersCmd.AddCommand(usersListCmd)
+	usersCmd.AddCommand(usersSearchCmd)
 	usersCmd.AddCommand(usersInfoCmd)
 	usersCmd.AddCommand(usersLookupCmd)
 	usersCmd.AddCommand(usersPresenceCmd)
 
 	usersListCmd.Flags().StringVar(&usersSearch, "search", "", "filter by name/email")
 	usersListCmd.Flags().IntVar(&usersLimit, "limit", 100, "max results")
+
+	usersSearchCmd.Flags().IntVar(&usersSearchLimit, "limit", 20, "max results")
+	usersSearchCmd.Flags().BoolVar(&usersSearchLocal, "local", false, "search synced local database instead of Slack API")
 
 	usersPresenceCmd.Flags().StringVar(&presenceSet, "set", "", "set presence: 'away' or 'auto'")
 }
@@ -125,6 +148,65 @@ func runUsersList(cmd *cobra.Command, args []string) error {
 
 	output.Print(output.UserListResult{Users: users})
 	return nil
+}
+
+func runUsersSearch(cmd *cobra.Command, args []string) error {
+	query := args[0]
+
+	if usersSearchLocal {
+		cfg := config.Get()
+
+		store, err := db.Open(cfg)
+		if err != nil {
+			return fmt.Errorf("database error: %w", err)
+		}
+		defer func() { _ = store.Close() }()
+
+		users, err := store.ListUsers(db.UserListOptions{
+			Search: query,
+			Limit:  usersSearchLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("search local users: %w", err)
+		}
+
+		output.Print(output.UserListResult{Users: users})
+		return nil
+	}
+
+	cfg := config.Get()
+	client, err := auth.GetClient(cfg)
+	if err != nil {
+		return fmt.Errorf("auth required: %w", err)
+	}
+
+	api := slack.NewAPI(client)
+	users, err := api.SearchUsers(query, usersSearchLimit)
+	if err != nil {
+		return fmt.Errorf("search users: %w", err)
+	}
+
+	output.Print(output.UserListResult{Users: usersToOutput(users)})
+	return nil
+}
+
+func usersToOutput(users []slack.UserInfo) []output.User {
+	result := make([]output.User, 0, len(users))
+	for _, user := range users {
+		name := user.RealName
+		if name == "" {
+			name = user.Name
+		}
+		result = append(result, output.User{
+			ID:          user.ID,
+			Email:       user.Profile.Email,
+			Name:        name,
+			DisplayName: user.Profile.DisplayName,
+			AvatarURL:   user.Profile.Image48,
+			IsBot:       user.IsBot,
+		})
+	}
+	return result
 }
 
 func runUsersInfo(cmd *cobra.Command, args []string) error {
