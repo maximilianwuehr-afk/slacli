@@ -1,5 +1,7 @@
 package output
 
+import "encoding/json"
+
 // Channel represents a Slack channel or DM
 type Channel struct {
 	ID            string   `json:"id"`
@@ -82,13 +84,19 @@ type UserListResult struct {
 
 // Draft represents a Slack draft
 type Draft struct {
-	ID        string `json:"id"`
-	Channel   string `json:"channel"`
-	ChannelID string `json:"channel_id"`
-	Text      string `json:"text"`
-	ThreadTS  string `json:"thread_ts,omitempty"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID            string                   `json:"id"`
+	Channel       string                   `json:"channel"`
+	ChannelID     string                   `json:"channel_id"`
+	Text          string                   `json:"text"`
+	ThreadTS      string                   `json:"thread_ts,omitempty"`
+	CreatedAt     string                   `json:"created_at"`
+	UpdatedAt     string                   `json:"updated_at"`
+	Blocks        []map[string]interface{} `json:"blocks,omitempty"`
+	Destinations  []map[string]interface{} `json:"destinations,omitempty"`
+	Attachments   json.RawMessage          `json:"attachments,omitempty"`
+	FileIDs       []string                 `json:"file_ids,omitempty"`
+	ClientMsgID   string                   `json:"client_msg_id,omitempty"`
+	LastUpdatedTS string                   `json:"last_updated_ts,omitempty"`
 }
 
 // DraftListResult is the output for drafts list command

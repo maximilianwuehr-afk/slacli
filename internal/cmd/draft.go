@@ -30,11 +30,13 @@ This command requires xoxc credentials configured with 'slacli drafts setup'.`,
 var (
 	draftThread string
 	draftStdin  bool
+	draftFormat string
 )
 
 func init() {
 	draftCmd.Flags().StringVar(&draftThread, "thread", "", "create a thread reply draft")
 	draftCmd.Flags().BoolVar(&draftStdin, "stdin", false, "read draft text from stdin")
+	draftCmd.Flags().StringVar(&draftFormat, "format", "literal", "draft format: literal or rich-text")
 }
 
 func runDraft(cmd *cobra.Command, args []string) error {
@@ -60,7 +62,7 @@ func runDraft(cmd *cobra.Command, args []string) error {
 	}
 
 	api := slack.NewXoxcAPI(client, creds.Workspace, creds.Token)
-	draft, updated, err := saveNativeDraft(api, args[0], text, draftThread)
+	draft, updated, err := saveNativeDraft(api, args[0], text, draftThread, draftFormat)
 	if err != nil {
 		return err
 	}
