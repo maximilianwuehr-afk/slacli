@@ -68,25 +68,16 @@ func (a *XoxcAPI) ListDrafts() ([]output.Draft, error) {
 		OK     bool   `json:"ok"`
 		Error  string `json:"error,omitempty"`
 		Drafts []struct {
-			ID          string `json:"id"`
-			DateCreated int64  `json:"date_created"`
-			IsDeleted   bool   `json:"is_deleted"`
-			IsSent      bool   `json:"is_sent"`
-			Blocks      []struct {
-				Type     string `json:"type"`
-				Elements []struct {
-					Type     string `json:"type"`
-					Elements []struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"elements"`
-				} `json:"elements"`
-			} `json:"blocks"`
-			Destinations []struct {
-				ChannelID string `json:"channel_id"`
-				ThreadTS  string `json:"thread_ts,omitempty"`
-			} `json:"destinations"`
-			LastUpdatedTS string `json:"last_updated_ts"`
+			ID            string                   `json:"id"`
+			DateCreated   int64                    `json:"date_created"`
+			IsDeleted     bool                     `json:"is_deleted"`
+			IsSent        bool                     `json:"is_sent"`
+			Blocks        []map[string]interface{} `json:"blocks"`
+			Destinations  []map[string]interface{} `json:"destinations"`
+			Attachments   json.RawMessage          `json:"attachments"`
+			FileIDs       []string                 `json:"file_ids"`
+			ClientMsgID   string                   `json:"client_msg_id"`
+			LastUpdatedTS string                   `json:"last_updated_ts"`
 		} `json:"drafts"`
 	}
 
@@ -105,28 +96,10 @@ func (a *XoxcAPI) ListDrafts() ([]output.Draft, error) {
 			continue
 		}
 
-		// Extract text from blocks
-		var text string
-		for _, block := range d.Blocks {
-			if block.Type == "rich_text" {
-				for _, elem := range block.Elements {
-					if elem.Type == "rich_text_section" {
-						for _, item := range elem.Elements {
-							if item.Type == "text" {
-								text += item.Text
-							}
-						}
-					}
-				}
-			}
-		}
+		text := DraftTextFromBlocks(d.Blocks)
 
 		// Get channel from destinations
-		var channelID, threadTS string
-		if len(d.Destinations) > 0 {
-			channelID = d.Destinations[0].ChannelID
-			threadTS = d.Destinations[0].ThreadTS
-		}
+		channelID, threadTS := destinationDetails(d.Destinations)
 
 		// Parse last_updated_ts (Slack timestamp format: "1234567890.123456")
 		var updatedAt time.Time
@@ -140,12 +113,18 @@ func (a *XoxcAPI) ListDrafts() ([]output.Draft, error) {
 		}
 
 		drafts = append(drafts, output.Draft{
-			ID:        d.ID,
-			ChannelID: channelID,
-			Text:      text,
-			ThreadTS:  threadTS,
-			CreatedAt: time.Unix(d.DateCreated, 0).Format(time.RFC3339),
-			UpdatedAt: updatedAt.Format(time.RFC3339),
+			ID:            d.ID,
+			ChannelID:     channelID,
+			Text:          text,
+			ThreadTS:      threadTS,
+			CreatedAt:     time.Unix(d.DateCreated, 0).Format(time.RFC3339),
+			UpdatedAt:     updatedAt.Format(time.RFC3339),
+			Blocks:        d.Blocks,
+			Destinations:  d.Destinations,
+			Attachments:   d.Attachments,
+			FileIDs:       d.FileIDs,
+			ClientMsgID:   d.ClientMsgID,
+			LastUpdatedTS: d.LastUpdatedTS,
 		})
 	}
 
@@ -156,6 +135,14 @@ func (a *XoxcAPI) ListDrafts() ([]output.Draft, error) {
 // If draftID is empty, creates a new draft
 // Returns the draft ID
 func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, error) {
+	return a.SaveDraftWithBlocks(channelID, text, threadTS, draftID, literalDraftBlocks(text))
+}
+
+// SaveDraftWithBlocks creates or updates a draft with caller-provided native
+// rich-text blocks. Existing draft metadata is read before an update so Slack's
+// identity, destination, attachments, and optimistic-concurrency fields stay
+// intact.
+func (a *XoxcAPI) SaveDraftWithBlocks(channelID, text, threadTS, draftID string, blocks []map[string]interface{}) (string, error) {
 	// Generate UUID for client_msg_id
 	clientMsgID := generateUUID()
 
@@ -164,22 +151,8 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 		return "", err
 	}
 
-	// Build blocks (rich_text format)
-	blocks := []map[string]interface{}{
-		{
-			"type": "rich_text",
-			"elements": []map[string]interface{}{
-				{
-					"type": "rich_text_section",
-					"elements": []map[string]interface{}{
-						{
-							"type": "text",
-							"text": text,
-						},
-					},
-				},
-			},
-		},
+	if len(blocks) == 0 {
+		blocks = literalDraftBlocks(text)
 	}
 
 	payload := map[string]interface{}{
@@ -203,6 +176,15 @@ func (a *XoxcAPI) SaveDraft(channelID, text, threadTS, draftID string) (string, 
 			payload["client_msg_id"] = meta.ClientMsgID
 		}
 		payload["client_last_updated_ts"] = meta.LastUpdatedTS
+		if len(meta.Destinations) > 0 {
+			payload["destinations"] = normalizeDraftDestinations(meta.Destinations)
+		}
+		if meta.Attachments != nil {
+			payload["attachments"] = meta.Attachments
+		}
+		if meta.FileIDs != nil {
+			payload["file_ids"] = meta.FileIDs
+		}
 	}
 
 	params, err := encodePayloadValues(payload)
@@ -258,6 +240,40 @@ func (a *XoxcAPI) draftDestination(channelID, threadTS string) (map[string]inter
 	return map[string]interface{}{
 		"channel_id": channelID,
 	}, nil
+}
+
+func destinationDetails(destinations []map[string]interface{}) (string, string) {
+	if len(destinations) == 0 {
+		return "", ""
+	}
+	destination := destinations[0]
+	channelID, _ := destination["channel_id"].(string)
+	threadTS, _ := destination["thread_ts"].(string)
+	return channelID, threadTS
+}
+
+func normalizeDraftDestinations(destinations []map[string]interface{}) []map[string]interface{} {
+	normalized := make([]map[string]interface{}, 0, len(destinations))
+	for _, destination := range destinations {
+		copyDestination := make(map[string]interface{}, len(destination))
+		for key, value := range destination {
+			copyDestination[key] = value
+		}
+		_, hasChannel := copyDestination["channel_id"]
+		threadTS, hasThread := copyDestination["thread_ts"].(string)
+		_, hasUsers := copyDestination["user_ids"]
+		if hasChannel && hasThread && threadTS != "" {
+			// Slack's update endpoint rejects a thread destination that also
+			// contains the DM user_ids echoed by drafts.list.
+			delete(copyDestination, "user_ids")
+		} else if hasUsers {
+			// For a non-thread DM, user_ids is the stable destination key.
+			delete(copyDestination, "channel_id")
+			delete(copyDestination, "thread_ts")
+		}
+		normalized = append(normalized, copyDestination)
+	}
+	return normalized
 }
 
 func encodePayloadValues(payload map[string]interface{}) (url.Values, error) {
@@ -323,6 +339,9 @@ func (a *XoxcAPI) DeleteDraft(channelID, draftID string) error {
 type draftUpdateMetadata struct {
 	LastUpdatedTS string
 	ClientMsgID   string
+	Destinations  []map[string]interface{}
+	Attachments   json.RawMessage
+	FileIDs       []string
 }
 
 // getDraftUpdateMetadata fetches draft metadata required for Slack's conflict check.
@@ -341,9 +360,12 @@ func (a *XoxcAPI) getDraftUpdateMetadata(draftID string) (draftUpdateMetadata, e
 		OK     bool   `json:"ok"`
 		Error  string `json:"error,omitempty"`
 		Drafts []struct {
-			ID            string `json:"id"`
-			LastUpdatedTS string `json:"last_updated_ts"`
-			ClientMsgID   string `json:"client_msg_id"`
+			ID            string                   `json:"id"`
+			LastUpdatedTS string                   `json:"last_updated_ts"`
+			ClientMsgID   string                   `json:"client_msg_id"`
+			Destinations  []map[string]interface{} `json:"destinations"`
+			Attachments   json.RawMessage          `json:"attachments"`
+			FileIDs       []string                 `json:"file_ids"`
 		} `json:"drafts"`
 	}
 
@@ -360,6 +382,9 @@ func (a *XoxcAPI) getDraftUpdateMetadata(draftID string) (draftUpdateMetadata, e
 			return draftUpdateMetadata{
 				LastUpdatedTS: d.LastUpdatedTS,
 				ClientMsgID:   d.ClientMsgID,
+				Destinations:  d.Destinations,
+				Attachments:   d.Attachments,
+				FileIDs:       d.FileIDs,
 			}, nil
 		}
 	}
