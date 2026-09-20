@@ -135,12 +135,12 @@ func init() {
 	draftsCreateCmd.Flags().StringVar(&draftsCreateChannel, "channel", "", "target channel/DM (required)")
 	draftsCreateCmd.Flags().StringVar(&draftsCreateText, "text", "", "draft text (or read from stdin)")
 	draftsCreateCmd.Flags().StringVar(&draftsCreateThread, "thread", "", "reply to thread")
-	draftsCreateCmd.Flags().StringVar(&draftsCreateFormat, "format", "literal", "draft format: literal or rich-text")
+	draftsCreateCmd.Flags().StringVar(&draftsCreateFormat, "format", slack.DraftFormatRichText, "draft format: literal or rich-text")
 	cobra.CheckErr(draftsCreateCmd.MarkFlagRequired("channel"))
 
 	// Edit flags
 	draftsEditCmd.Flags().StringVar(&draftsEditText, "text", "", "new text for draft")
-	draftsEditCmd.Flags().StringVar(&draftsEditFormat, "format", "literal", "draft format: literal or rich-text")
+	draftsEditCmd.Flags().StringVar(&draftsEditFormat, "format", slack.DraftFormatRichText, "draft format: literal or rich-text")
 
 	// Delete flags
 	draftsDeleteCmd.Flags().BoolVar(&draftsDeleteForce, "force", false, "skip confirmation")

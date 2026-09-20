@@ -328,27 +328,28 @@ To get xoxc credentials:
 ```bash
 slacli draft "#engineering" "RFC: New auth system"     # Create native Slack draft
 slacli draft "#eng" --thread 123.456 --stdin           # Create draft from stdin
-slacli draft "#eng" --format rich-text --stdin        # Opt in to native formatting
+slacli draft "#eng" --stdin                            # Native formatting is the default
 slacli drafts list                                    # List all drafts
 slacli drafts list --channel "#engineering"           # Filter by channel
 slacli drafts list --json                             # JSON output
 slacli drafts create --channel "#engineering" --text "RFC: New auth system"
-slacli drafts create --channel "#engineering" --format rich-text --text "**Bold**\n\n- First\n- Second"
+slacli drafts create --channel "#engineering" --text "**Bold**\n\n- First\n- Second"
 slacli drafts create --channel "#eng" --thread 123.456 --text "Thread reply"
 slacli drafts show <draft-id>                         # View draft content
 slacli drafts edit <draft-id> --text "Updated text"   # Edit draft (xoxc only)
-slacli drafts edit <draft-id> --format rich-text --text "Updated **formatted** text"
+slacli drafts edit <draft-id> --text "Updated **formatted** text"
 slacli drafts send <draft-id>                         # Send draft immediately
 slacli drafts delete <draft-id>                       # Delete draft
 ```
 
-`--format literal` is the default. It sends the input as one text node, which
-preserves the existing CLI behavior. `--format rich-text` enables the small
-native formatting grammar: paragraphs, `**bold**`, `_italic_`, `-`/`*`/`+`
-bullets, `1.` numbered items, and labelled links such as
-`<https://example.test/docs?q=x#FAQ|FAQ>`. Escape a marker with `\\` when it
-must stay literal. This mode requires native xoxc drafts; the CLI refuses to
-turn a formatted draft into a scheduled message.
+`--format rich-text` is the default for `draft`, `drafts create`, and `drafts
+edit`. It enables the small native formatting grammar: paragraphs, `**bold**`,
+`_italic_`, `-`/`*`/`+` bullets, `1.` numbered items, and labelled links such as
+`<https://example.test/docs?q=x#FAQ|FAQ>`. Use `--format literal` as the
+explicit exact-text escape hatch; it sends the input as one text node and keeps
+formatting markers literal. Escape a marker with `\\` when it must stay literal.
+Rich-text create/edit requires native xoxc drafts; the CLI refuses to turn a
+formatted draft into a scheduled message.
 
 `drafts list`, `drafts show`, and JSON output preserve native `blocks`,
 destinations, attachments, file IDs, and optimistic-concurrency metadata.

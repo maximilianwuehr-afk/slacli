@@ -36,7 +36,7 @@ var (
 func init() {
 	draftCmd.Flags().StringVar(&draftThread, "thread", "", "create a thread reply draft")
 	draftCmd.Flags().BoolVar(&draftStdin, "stdin", false, "read draft text from stdin")
-	draftCmd.Flags().StringVar(&draftFormat, "format", "literal", "draft format: literal or rich-text")
+	draftCmd.Flags().StringVar(&draftFormat, "format", slack.DraftFormatRichText, "draft format: literal or rich-text")
 }
 
 func runDraft(cmd *cobra.Command, args []string) error {
