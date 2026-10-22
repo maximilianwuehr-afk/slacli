@@ -300,16 +300,16 @@ func (s *Store) ListMessages(opts MessageListOptions) ([]output.Message, error) 
 	}
 
 	if opts.Before != "" {
-		query += " AND julianday(m.timestamp) < julianday(?)"
+		query += " AND CAST(m.id AS REAL) < CAST(? AS REAL)"
 		args = append(args, opts.Before)
 	}
 
 	if opts.After != "" {
-		query += " AND julianday(m.timestamp) > julianday(?)"
+		query += " AND CAST(m.id AS REAL) > CAST(? AS REAL)"
 		args = append(args, opts.After)
 	}
 
-	query += " ORDER BY m.timestamp DESC"
+	query += " ORDER BY CAST(m.id AS REAL) DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)

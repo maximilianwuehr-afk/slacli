@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -260,8 +261,15 @@ func listMessagesWithThreadFallback(
 	opts db.MessageListOptions,
 	newAPI func() (*slack.API, error),
 ) ([]output.Message, error) {
-	opts.Before = messageFilterTimestamp(opts.Before)
-	opts.After = messageFilterTimestamp(opts.After)
+	var err error
+	opts.Before, err = messageFilterTimestamp(opts.Before)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --before: %w", err)
+	}
+	opts.After, err = messageFilterTimestamp(opts.After)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --after: %w", err)
+	}
 	messages, err := store.ListMessages(opts)
 	if err != nil {
 		// A channel name that is not in the local channel cache can still be
@@ -317,14 +325,21 @@ func listMessagesWithThreadFallback(
 	return messages, nil
 }
 
-func messageFilterTimestamp(value string) string {
-	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-		return parsed.UTC().Format(time.RFC3339)
+// Compare Slack IDs, since older cached display timestamps lost fractional seconds.
+func messageFilterTimestamp(value string) (string, error) {
+	if value == "" {
+		return "", nil
 	}
-	if _, err := strconv.ParseFloat(value, 64); err == nil {
-		return slack.TimestampToRFC3339(value)
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return fmt.Sprintf("%d.%09d", parsed.Unix(), parsed.Nanosecond()), nil
+		}
 	}
-	return value
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return "", fmt.Errorf("expected a Slack timestamp, RFC3339 timestamp, or YYYY-MM-DD")
+	}
+	return value, nil
 }
 
 func threadCacheMiss(store *db.Store, channelID, threadTS string) (bool, error) {
@@ -352,6 +367,8 @@ func threadCacheMiss(store *db.Store, channelID, threadTS string) (bool, error) 
 
 func fetchLiveThreadMessages(api *slack.API, channelID string, opts db.MessageListOptions) ([]output.Message, error) {
 	messages := []output.Message{}
+	before, _ := strconv.ParseFloat(opts.Before, 64)
+	after, _ := strconv.ParseFloat(opts.After, 64)
 	cursor := ""
 	seenCursors := map[string]struct{}{}
 	for {
@@ -362,13 +379,18 @@ func fetchLiveThreadMessages(api *slack.API, channelID string, opts db.MessageLi
 
 		for _, message := range resp.Messages {
 			timestamp := slack.TimestampToRFC3339(message.TS)
-			if (opts.Before != "" && timestamp >= opts.Before) || (opts.After != "" && timestamp <= opts.After) {
+			seconds, err := strconv.ParseFloat(message.TS, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid message timestamp: %w", err)
+			}
+			if (opts.Before != "" && seconds >= before) || (opts.After != "" && seconds <= after) {
 				continue
 			}
 			converted := output.Message{
 				ID:         message.TS,
 				ChannelID:  channelID,
 				AuthorID:   message.User,
+				AuthorName: message.User,
 				Text:       message.Text,
 				Timestamp:  timestamp,
 				ThreadTS:   message.ThreadTS,
@@ -385,7 +407,7 @@ func fetchLiveThreadMessages(api *slack.API, channelID string, opts db.MessageLi
 		}
 
 		nextCursor := resp.ResponseMetadata.NextCursor
-		if !resp.HasMore || nextCursor == "" {
+		if nextCursor == "" {
 			break
 		}
 		if _, seen := seenCursors[nextCursor]; seen {

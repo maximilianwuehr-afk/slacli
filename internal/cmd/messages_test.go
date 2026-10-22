@@ -25,7 +25,7 @@ func TestListMessagesWithThreadFallbackPaginatesAndAppliesLimit(t *testing.T) {
 			{Type: "message", TS: threadTS, Text: "thread parent", ReplyCount: 3},
 			{Type: "message", TS: "1700000001.000001", ThreadTS: threadTS, Text: "first reply"},
 		},
-		HasMore:          true,
+		HasMore:          false,
 		ResponseMetadata: slack.ResponseMetadata{NextCursor: "page-2"},
 	}
 	pageTwo := slack.RepliesResponse{
@@ -267,5 +267,59 @@ func TestCompleteFilteredThreadNeedsNoAuth(t *testing.T) {
 	got, err := listMessagesWithThreadFallback(store, db.MessageListOptions{Channel: "#general", ThreadTS: parent, After: "2024-01-01T00:00:00Z"}, func() (*slack.API, error) { t.Fatal("empty filtered cache required auth"); return nil, nil })
 	if err != nil || got == nil || len(got) != 0 {
 		t.Fatalf("got %#v, %v; want []", got, err)
+	}
+}
+
+func TestThreadFractionalFiltersMatchCacheAndLive(t *testing.T) {
+	const parent = "1700000000.000000"
+	const early = "1700000000.499999"
+	const late = "1700000000.500001"
+	for _, cached := range []bool{false, true} {
+		for _, boundary := range []string{"1700000000.500000", "2023-11-14T23:13:20.5+01:00"} {
+			for _, before := range []bool{false, true} {
+				store := newMessagesTestStore(t)
+				insertTestMessage(t, store, "C123", parent, "", 2, "parent")
+				if cached {
+					insertTestMessage(t, store, "C123", early, parent, 0, "early")
+					insertTestMessage(t, store, "C123", late, parent, 0, "late")
+					// Old cache display timestamps do not retain microseconds.
+					if _, err := store.DB().Exec("UPDATE messages SET timestamp = ?", "2023-11-14T23:13:20+01:00"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				opts := db.MessageListOptions{Channel: "C123", ThreadTS: parent, Limit: 10}
+				if before {
+					opts.Before = boundary
+				} else {
+					opts.After = boundary
+				}
+				api := slack.NewAPI(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					return jsonHTTPResponse(req, []byte(`{"ok":true,"messages":[{"ts":"1700000000.000000","reply_count":2,"user":"U1"},{"ts":"1700000000.499999","thread_ts":"1700000000.000000","user":"U1"},{"ts":"1700000000.500001","thread_ts":"1700000000.000000","user":"U1"}]}`)), nil
+				})})
+				got, err := listMessagesWithThreadFallback(store, opts, func() (*slack.API, error) {
+					if cached {
+						t.Fatal("cache required API")
+					}
+					return api, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ids := []string{}
+				for _, m := range got {
+					ids = append(ids, m.ID)
+					if !cached && m.AuthorName != "U1" {
+						t.Fatalf("live display author missing: %#v", m)
+					}
+				}
+				want := []string{late}
+				if before {
+					want = []string{early, parent}
+				}
+				if !reflect.DeepEqual(ids, want) {
+					t.Fatalf("cached=%v before=%v boundary=%s: got %v want %v", cached, before, boundary, ids, want)
+				}
+			}
+		}
 	}
 }
