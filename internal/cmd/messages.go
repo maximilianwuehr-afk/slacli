@@ -1,7 +1,14 @@
 package cmd
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -32,10 +39,18 @@ var messagesSearchCmd = &cobra.Command{
 }
 
 var messagesContextCmd = &cobra.Command{
-	Use:   "context <message_id>",
-	Short: "Show messages around a specific message",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runMessagesContext,
+	Use:   "context <message_id> | <channel> <timestamp>",
+	Short: "Show messages around a message ID or channel timestamp",
+	Long: `Show messages around a Slack message.
+
+Context reads the local cache. Pass the Slack timestamp as <message_id>,
+or pass the channel and timestamp. Run slack sync to populate the cache.
+
+Examples:
+  slack messages context 1704540600.123456
+  slack messages context "#general" 1704540600.123456`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: runMessagesContext,
 }
 
 var messagesUnreadCmd = &cobra.Command{
@@ -162,7 +177,13 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		ThreadTS: msgListThread,
 	}
 
-	messages, err := store.ListMessages(opts)
+	messages, err := listMessagesWithThreadFallback(store, opts, func() (*slack.API, error) {
+		client, err := auth.GetClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("auth required: %w", err)
+		}
+		return slack.NewAPI(client), nil
+	})
 	if err != nil {
 		return fmt.Errorf("list messages: %w", err)
 	}
@@ -185,7 +206,10 @@ func runMessagesSearch(cmd *cobra.Command, args []string) error {
 
 func runMessagesContext(cmd *cobra.Command, args []string) error {
 	cfg := config.Get()
-	messageID := args[0]
+	channel, messageID, err := parseMessageContextArgs(args)
+	if err != nil {
+		return err
+	}
 
 	store, err := db.Open(cfg)
 	if err != nil {
@@ -194,12 +218,210 @@ func runMessagesContext(cmd *cobra.Command, args []string) error {
 	defer func() { _ = store.Close() }()
 
 	messages, err := store.GetMessageContext(messageID, msgContextBefore, msgContextAfter)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("message %s is not in the local cache; context requires a synced message (run: slack sync)", messageID)
+	}
 	if err != nil {
 		return fmt.Errorf("get context: %w", err)
+	}
+	if channel != "" && !contextContainsChannelMessage(messages, channel, messageID) {
+		return fmt.Errorf("message %s not found in channel %s", messageID, channel)
 	}
 
 	output.Print(output.MessageListResult{Messages: messages})
 	return nil
+}
+
+func parseMessageContextArgs(args []string) (channel, messageID string, err error) {
+	switch len(args) {
+	case 1:
+		return "", args[0], nil
+	case 2:
+		return args[0], args[1], nil
+	default:
+		return "", "", fmt.Errorf("expected <message_id> or <channel> <timestamp>")
+	}
+}
+
+func contextContainsChannelMessage(messages []output.Message, channel, messageID string) bool {
+	channel = strings.TrimPrefix(strings.TrimPrefix(channel, "#"), "@")
+	for _, message := range messages {
+		if message.ID != messageID {
+			continue
+		}
+		if strings.EqualFold(message.ChannelID, channel) || strings.EqualFold(message.ChannelName, channel) {
+			return true
+		}
+	}
+	return false
+}
+
+func listMessagesWithThreadFallback(
+	store *db.Store,
+	opts db.MessageListOptions,
+	newAPI func() (*slack.API, error),
+) ([]output.Message, error) {
+	var err error
+	opts.Before, err = messageFilterTimestamp(opts.Before)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --before: %w", err)
+	}
+	opts.After, err = messageFilterTimestamp(opts.After)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --after: %w", err)
+	}
+	messages, err := store.ListMessages(opts)
+	if err != nil {
+		// A channel name that is not in the local channel cache can still be
+		// resolved by Slack when the requested thread needs a live fetch.
+		if opts.ThreadTS == "" || !strings.HasPrefix(err.Error(), "channel not found: ") {
+			return nil, err
+		}
+		messages = []output.Message{}
+	}
+	if messages == nil {
+		messages = []output.Message{}
+	}
+	if opts.ThreadTS == "" {
+		return messages, nil
+	}
+
+	cached := messages
+	if len(cached) == 0 {
+		unfiltered := opts
+		unfiltered.Before, unfiltered.After, unfiltered.Limit = "", "", 1
+		cached, err = store.ListMessages(unfiltered)
+		if err != nil && !strings.HasPrefix(err.Error(), "channel not found: ") {
+			return nil, err
+		}
+	}
+	channelID := ""
+	if len(cached) > 0 {
+		channelID = cached[0].ChannelID
+		cacheMiss, err := threadCacheMiss(store, channelID, opts.ThreadTS)
+		if err != nil {
+			return nil, fmt.Errorf("check thread cache: %w", err)
+		}
+		if !cacheMiss {
+			return messages, nil
+		}
+	}
+
+	api, err := newAPI()
+	if err != nil {
+		return nil, fmt.Errorf("create Slack client: %w", err)
+	}
+	if channelID == "" {
+		channelID, err = api.ResolveChannel(opts.Channel)
+		if err != nil {
+			return nil, fmt.Errorf("resolve channel: %w", err)
+		}
+	}
+
+	messages, err = fetchLiveThreadMessages(api, channelID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("fetch thread replies: %w", err)
+	}
+	return messages, nil
+}
+
+// Compare Slack IDs, since older cached display timestamps lost fractional seconds.
+func messageFilterTimestamp(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return fmt.Sprintf("%d.%09d", parsed.Unix(), parsed.Nanosecond()), nil
+		}
+	}
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return "", fmt.Errorf("expected a Slack timestamp, RFC3339 timestamp, or YYYY-MM-DD")
+	}
+	return value, nil
+}
+
+func threadCacheMiss(store *db.Store, channelID, threadTS string) (bool, error) {
+	var replyCount int
+	err := store.DB().QueryRow(
+		"SELECT reply_count FROM messages WHERE channel_id = ? AND id = ?",
+		channelID, threadTS,
+	).Scan(&replyCount)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var cachedReplies int
+	if err := store.DB().QueryRow(
+		"SELECT COUNT(*) FROM messages WHERE channel_id = ? AND thread_ts = ? AND id != ?",
+		channelID, threadTS, threadTS,
+	).Scan(&cachedReplies); err != nil {
+		return false, err
+	}
+	return cachedReplies < replyCount, nil
+}
+
+func fetchLiveThreadMessages(api *slack.API, channelID string, opts db.MessageListOptions) ([]output.Message, error) {
+	messages := []output.Message{}
+	before, _ := strconv.ParseFloat(opts.Before, 64)
+	after, _ := strconv.ParseFloat(opts.After, 64)
+	cursor := ""
+	seenCursors := map[string]struct{}{}
+	for {
+		resp, err := api.GetReplies(channelID, opts.ThreadTS, cursor, 200)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, message := range resp.Messages {
+			timestamp := slack.TimestampToRFC3339(message.TS)
+			seconds, err := strconv.ParseFloat(message.TS, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid message timestamp: %w", err)
+			}
+			if (opts.Before != "" && seconds >= before) || (opts.After != "" && seconds <= after) {
+				continue
+			}
+			converted := output.Message{
+				ID:         message.TS,
+				ChannelID:  channelID,
+				AuthorID:   message.User,
+				AuthorName: message.User,
+				Text:       message.Text,
+				Timestamp:  timestamp,
+				ThreadTS:   message.ThreadTS,
+				ReplyCount: message.ReplyCount,
+				Edited:     message.Edited != nil,
+			}
+			for _, reaction := range message.Reactions {
+				converted.Reactions = append(converted.Reactions, output.Reaction{
+					Name:  reaction.Name,
+					Count: reaction.Count,
+				})
+			}
+			messages = append(messages, converted)
+		}
+
+		nextCursor := resp.ResponseMetadata.NextCursor
+		if nextCursor == "" {
+			break
+		}
+		if _, seen := seenCursors[nextCursor]; seen {
+			return nil, fmt.Errorf("conversations.replies returned repeated cursor %q", nextCursor)
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
+	}
+
+	sort.Slice(messages, func(i, j int) bool { return messages[i].ID > messages[j].ID })
+	if opts.Limit > 0 && len(messages) > opts.Limit {
+		messages = messages[:opts.Limit]
+	}
+	return messages, nil
 }
 
 func runMessagesUnread(cmd *cobra.Command, args []string) error {

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -644,80 +643,106 @@ func (a *API) DeleteScheduledMessage(channelID, scheduledMsgID string) error {
 	return nil
 }
 
-// UploadFile uploads a file to a channel
-func (a *API) UploadFile(channelID, filePath, initialComment string) (output.FileUploadResult, error) {
+// UploadFile uploads a file and its comment as one channel or thread message.
+func (a *API) UploadFile(channelID, filePath, initialComment, threadTS string) (output.FileUploadResult, error) {
+	var empty output.FileUploadResult
 	file, err := os.Open(filePath)
 	if err != nil {
-		return output.FileUploadResult{}, err
+		return empty, err
 	}
 	defer func() { _ = file.Close() }()
-
-	// Create multipart form
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	// Add file
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	info, err := file.Stat()
 	if err != nil {
-		return output.FileUploadResult{}, err
+		return empty, err
 	}
-	if _, err := io.Copy(part, file); err != nil {
-		return output.FileUploadResult{}, err
+	if !info.Mode().IsRegular() {
+		return empty, fmt.Errorf("upload requires a regular file")
+	}
+	name := filepath.Base(filePath)
+	body, err := a.postEncoded("files.getUploadURLExternal", "application/x-www-form-urlencoded", []byte(url.Values{
+		"filename": {name}, "length": {strconv.FormatInt(info.Size(), 10)},
+	}.Encode()))
+	if err != nil {
+		return empty, fmt.Errorf("files.getUploadURLExternal: %w", err)
+	}
+	var upload struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		URL   string `json:"upload_url"`
+		ID    string `json:"file_id"`
+	}
+	if err := json.Unmarshal(body, &upload); err != nil {
+		return empty, fmt.Errorf("files.getUploadURLExternal: %w", err)
+	}
+	if !upload.OK {
+		return empty, fmt.Errorf("files.getUploadURLExternal: %s", upload.Error)
+	}
+	if upload.ID == "" || upload.URL == "" {
+		return empty, fmt.Errorf("files.getUploadURLExternal: missing file ID or upload URL")
+	}
+	u, err := url.Parse(upload.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return empty, fmt.Errorf("files.getUploadURLExternal: invalid HTTPS upload URL")
+	}
+	req, err := http.NewRequest(http.MethodPost, upload.URL, file)
+	if err != nil {
+		return empty, err
+	}
+	req.ContentLength = info.Size()
+	req.Header.Set("Content-Type", "application/octet-stream")
+	// The signed upload URL needs no Slack token. Do not use the auth transport.
+	uploadClient := &http.Client{Transport: http.DefaultTransport, Timeout: a.client.Timeout}
+	resp, err := uploadClient.Do(req)
+	if err != nil {
+		return empty, fmt.Errorf("upload bytes: %w", err)
+	}
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return empty, fmt.Errorf("upload bytes: HTTP %d", resp.StatusCode)
+	}
+	if readErr != nil {
+		return empty, fmt.Errorf("upload bytes: %w", readErr)
 	}
 
-	// Add other fields
-	if err := writer.WriteField("channels", channelID); err != nil {
-		return output.FileUploadResult{}, err
+	payload := map[string]interface{}{
+		"files":      []map[string]string{{"id": upload.ID, "title": name}},
+		"channel_id": channelID,
 	}
 	if initialComment != "" {
-		if err := writer.WriteField("initial_comment", initialComment); err != nil {
-			return output.FileUploadResult{}, err
-		}
+		payload["initial_comment"] = initialComment
 	}
-
-	if err := writer.Close(); err != nil {
-		return output.FileUploadResult{}, err
+	if threadTS != "" {
+		payload["thread_ts"] = threadTS
 	}
-
-	req, err := http.NewRequest("POST", baseURL+"/files.upload", &buf)
+	body, err = a.post("files.completeUploadExternal", payload)
 	if err != nil {
-		return output.FileUploadResult{}, err
+		return empty, fmt.Errorf("files.completeUploadExternal: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	a.rateLimiter.wait()
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return output.FileUploadResult{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return output.FileUploadResult{}, err
-	}
-
 	var result struct {
 		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
-		File  struct {
+		Error string `json:"error"`
+		Files []struct {
 			ID        string `json:"id"`
 			Name      string `json:"name"`
 			Permalink string `json:"permalink"`
-		} `json:"file"`
+		} `json:"files"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return output.FileUploadResult{}, err
+		return empty, fmt.Errorf("files.completeUploadExternal: %w", err)
 	}
 	if !result.OK {
-		return output.FileUploadResult{}, fmt.Errorf("files.upload: %s", result.Error)
+		return empty, fmt.Errorf("files.completeUploadExternal: %s", result.Error)
 	}
-
-	return output.FileUploadResult{
-		FileID:    result.File.ID,
-		FileName:  result.File.Name,
-		Permalink: result.File.Permalink,
-	}, nil
+	for _, f := range result.Files {
+		if f.ID == upload.ID {
+			if f.Name == "" {
+				f.Name = name
+			}
+			return output.FileUploadResult{FileID: f.ID, FileName: f.Name, Permalink: f.Permalink}, nil
+		}
+	}
+	return empty, fmt.Errorf("files.completeUploadExternal: uploaded file missing from response")
 }
 
 // Draft methods
@@ -1608,13 +1633,17 @@ func (a *API) post(method string, payload map[string]interface{}) ([]byte, error
 		return nil, err
 	}
 
+	return a.postEncoded(method, "application/json; charset=utf-8", body)
+}
+
+func (a *API) postEncoded(method, contentType string, body []byte) ([]byte, error) {
 	a.rateLimiter.wait()
 
 	req, err := http.NewRequest("POST", baseURL+"/"+method, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -1627,10 +1656,10 @@ func (a *API) post(method string, payload map[string]interface{}) ([]byte, error
 		retryAfter := resp.Header.Get("Retry-After")
 		if secs, err := strconv.Atoi(retryAfter); err == nil {
 			time.Sleep(time.Duration(secs) * time.Second)
-			return a.post(method, payload)
+			return a.postEncoded(method, contentType, body)
 		}
 		time.Sleep(time.Second)
-		return a.post(method, payload)
+		return a.postEncoded(method, contentType, body)
 	}
 
 	return io.ReadAll(resp.Body)

@@ -39,7 +39,7 @@ func SaveXoxcCredentials(cfg *config.Config, creds *XoxcCredentials) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfg.XoxcCredentialsPath(), data, 0600)
+	return config.WritePrivateFile(cfg.XoxcCredentialsPath(), data)
 }
 
 // HasXoxcCredentials checks if xoxc credentials are configured
@@ -88,13 +88,13 @@ type xoxcTransport struct {
 func (t *xoxcTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req2 := req.Clone(req.Context())
 	req2.Header.Set("Authorization", "Bearer "+t.token)
-	
+
 	// Add the d cookie
 	cookieValue := t.cookie
 	if !strings.HasPrefix(cookieValue, "d=") {
 		cookieValue = "d=" + cookieValue
 	}
 	req2.Header.Set("Cookie", cookieValue)
-	
+
 	return t.base.RoundTrip(req2)
 }

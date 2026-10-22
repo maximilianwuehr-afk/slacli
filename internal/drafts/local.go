@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"slacli/internal/config"
 	"slacli/internal/output"
 )
 
@@ -79,12 +80,7 @@ func (s *LocalStore) save() error {
 		return err
 	}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(s.path, data, 0644)
+	return config.WritePrivateFile(s.path, data)
 }
 
 // List returns all local drafts

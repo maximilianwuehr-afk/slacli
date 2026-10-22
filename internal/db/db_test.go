@@ -5,6 +5,7 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -48,6 +49,73 @@ func TestOpen_CreatesDatabase(t *testing.T) {
 	}
 	if info.Size() == 0 {
 		t.Error("Database file is empty")
+	}
+}
+
+func TestOpenSecuresExistingDatabaseAndStoreDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	storeDir := filepath.Join(tmpDir, "store")
+	if err := os.Mkdir(storeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{StoreDir: storeDir}
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.DatabasePath(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	assertFileMode(t, storeDir, 0700)
+	assertFileMode(t, cfg.DatabasePath(), 0600)
+	for _, sidecar := range []string{cfg.DatabasePath() + "-wal", cfg.DatabasePath() + "-shm"} {
+		if _, err := os.Stat(sidecar); err == nil {
+			assertFileMode(t, sidecar, 0600)
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSaveSyncStateSecuresExistingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file mode bits are not supported on Windows")
+	}
+	storeDir := filepath.Join(t.TempDir(), "store")
+	if err := os.Mkdir(storeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{StoreDir: storeDir}
+	if err := os.WriteFile(cfg.SyncStatePath(), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSyncState(cfg, &SyncState{LastSync: "2026-10-22T10:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	assertFileMode(t, storeDir, 0700)
+	assertFileMode(t, cfg.SyncStatePath(), 0600)
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %04o, want %04o", path, got, want)
 	}
 }
 

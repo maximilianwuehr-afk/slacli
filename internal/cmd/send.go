@@ -78,7 +78,7 @@ func runSend(cmd *cobra.Command, args []string) error {
 
 	// Upload file if specified
 	if sendFile != "" {
-		result, err := api.UploadFile(channelID, sendFile, text)
+		result, err := api.UploadFile(channelID, sendFile, text, sendThread)
 		if err != nil {
 			return fmt.Errorf("upload file: %w", err)
 		}

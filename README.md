@@ -152,7 +152,7 @@ Add to `~/.bashrc`, `~/.zshrc`, or equivalent.
 slacli auth
 ```
 
-Opens browser for OAuth. Token stored securely in `~/.slacli/credentials.json` (chmod 600).
+Opens a browser for OAuth. Tokens are stored in `~/.slacli/credentials.json` with owner-only access (0600); the store directory uses mode 0700.
 
 ### 4. Initial Sync
 
@@ -185,7 +185,7 @@ slacli sync --recent --days 7     # Incrementally sync recently active channels
 slacli sync --days 60             # Sync 60 days of history
 slacli sync --active-days 7       # Fast: active channel messages
 slacli sync --channels-only       # Sync channel metadata only
-slacli sync --follow              # Continuous sync (30s intervals)
+slacli sync --follow              # Keep this process syncing (30s intervals; Ctrl+C to stop)
 slacli sync --threads             # Fill missing thread replies
 slacli sync --threads --full      # Force re-sync all known thread replies
 slacli sync --threads --active-days 7  # Fill recent thread replies
@@ -229,6 +229,10 @@ Search never runs inline sync. If the local index is stale, run:
 slacli sync --recent --days 7
 ```
 
+Sync runs when you invoke the command. `--follow` keeps the current process
+running and repeats sync every 30 seconds. The CLI does not install a recurring
+system schedule.
+
 ### Messages
 
 **List:**
@@ -239,6 +243,9 @@ slacli messages list --channel "#general" --before 1704540600.123456
 slacli messages list --channel "#general" --after 1704540600.123456
 slacli messages list --channel "#general" --thread 1704540600.123456  # Thread
 ```
+
+Thread reads fetch replies from Slack when the thread is missing or incomplete in
+the local cache. Empty lists are returned as `[]`.
 
 **Search:**
 ```bash
@@ -255,7 +262,8 @@ slacli messages search "query" --json                    # JSON output
 
 **Context:**
 ```bash
-slacli messages context <message_id>              # Messages around target
+slacli messages context <message_id>              # Cached context; ID is the Slack timestamp
+slacli messages context C123ABC 1704540600.123456  # Channel plus timestamp
 slacli messages context <message_id> --before 5   # 5 before
 slacli messages context <message_id> --after 10   # 10 after
 ```
@@ -282,6 +290,9 @@ slacli send "alice@company.com" "Quick question"
 
 # With file attachment
 slacli send "#general" "Check this out" --file ./screenshot.png
+
+# File and comment in one thread reply
+slacli send "#general" "Check this out" --thread 1704540600.123456 --file ./screenshot.png
 
 # Reply to thread
 slacli send "#general" "Thread reply" --thread 1704540600.123456
@@ -389,8 +400,14 @@ slacli config whitelist list          # Show whitelist
 ### Diagnostics
 
 ```bash
-slacli doctor    # Check auth, DB, config, connectivity
+slacli doctor    # Check diagnostics and repair store permissions
 ```
+
+Doctor checks the store directory and known private files, then repairs modes
+when needed: 0700 for the store directory and 0600 for credentials, config,
+sync state, local drafts, and the SQLite database files. It warns when the last
+sync was more than 24 hours ago. A token with no expiry is reported as having
+no expiry set.
 
 ## Global Flags
 
@@ -436,14 +453,17 @@ slacli doctor    # Check auth, DB, config, connectivity
 
 ## Data Storage
 
-All data in `~/.slacli/` (or `$SLACLI_STORE`):
+All data in `~/.slacli/` (or `$SLACLI_STORE`). The store directory uses mode
+0700. Known data files use mode 0600 so only the current user can read them.
 
 | File | Purpose | Permissions |
 |------|---------|-------------|
-| `credentials.json` | OAuth access/refresh tokens | 600 (user-only) |
-| `slacli.db` | SQLite database with FTS5 | 644 |
-| `config.json` | User configuration | 644 |
-| `sync_state.json` | Sync cursors and metadata | 644 |
+| `credentials.json` | OAuth access/refresh tokens | 600 |
+| `xoxc_credentials.json` | Slack session credentials | 600 |
+| `slacli.db`, `slacli.db-wal`, `slacli.db-shm` | SQLite database and journal files | 600 |
+| `config.json` | User configuration | 600 |
+| `sync_state.json` | Sync cursors and metadata | 600 |
+| `drafts.json` | Local draft text | 600 |
 
 ## Database Schema
 
