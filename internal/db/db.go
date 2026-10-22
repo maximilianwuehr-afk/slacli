@@ -25,6 +25,15 @@ type Store struct {
 // Open opens or creates the database
 func Open(cfg *config.Config) (*Store, error) {
 	dbPath := cfg.DatabasePath()
+	if err := config.SecureDir(cfg.StoreDir); err != nil {
+		return nil, fmt.Errorf("secure store dir: %w", err)
+	}
+	if err := config.EnsurePrivateFile(dbPath); err != nil {
+		return nil, fmt.Errorf("secure database: %w", err)
+	}
+	if err := secureDatabaseSidecars(cfg); err != nil {
+		return nil, fmt.Errorf("secure database sidecars: %w", err)
+	}
 
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -35,7 +44,12 @@ func Open(cfg *config.Config) (*Store, error) {
 
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
+		_ = secureDatabaseFiles(cfg)
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := secureDatabaseFiles(cfg); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("secure database files: %w", err)
 	}
 
 	return store, nil
@@ -43,7 +57,30 @@ func Open(cfg *config.Config) (*Store, error) {
 
 // Close closes the database
 func (s *Store) Close() error {
-	return s.db.Close()
+	closeErr := s.db.Close()
+	if err := secureDatabaseFiles(s.cfg); err != nil {
+		if closeErr != nil {
+			return fmt.Errorf("close database: %v; secure database files: %w", closeErr, err)
+		}
+		return fmt.Errorf("secure database files: %w", err)
+	}
+	return closeErr
+}
+
+func secureDatabaseSidecars(cfg *config.Config) error {
+	for _, path := range []string{cfg.DatabasePath() + "-wal", cfg.DatabasePath() + "-shm"} {
+		if err := config.SecureFile(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func secureDatabaseFiles(cfg *config.Config) error {
+	if err := config.SecureFile(cfg.DatabasePath()); err != nil {
+		return err
+	}
+	return secureDatabaseSidecars(cfg)
 }
 
 // DB returns the underlying sql.DB for direct access
@@ -263,12 +300,12 @@ func (s *Store) ListMessages(opts MessageListOptions) ([]output.Message, error) 
 	}
 
 	if opts.Before != "" {
-		query += " AND m.timestamp < ?"
+		query += " AND julianday(m.timestamp) < julianday(?)"
 		args = append(args, opts.Before)
 	}
 
 	if opts.After != "" {
-		query += " AND m.timestamp > ?"
+		query += " AND julianday(m.timestamp) > julianday(?)"
 		args = append(args, opts.After)
 	}
 
@@ -838,5 +875,5 @@ func SaveSyncState(cfg *config.Config, state *SyncState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfg.SyncStatePath(), data, 0600)
+	return config.WritePrivateFile(cfg.SyncStatePath(), data)
 }

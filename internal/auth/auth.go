@@ -381,7 +381,7 @@ func SaveCredentials(cfg *config.Config, creds *Credentials) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfg.CredentialsPath(), data, 0600)
+	return config.WritePrivateFile(cfg.CredentialsPath(), data)
 }
 
 // authTransport adds auth header to requests

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -19,22 +20,24 @@ import (
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Run diagnostics",
-	Long:  `Check auth status, database integrity, sync state, and API connectivity.`,
+	Long:  `Check auth status, database integrity, sync freshness, store permissions, and API connectivity.`,
 	RunE:  runDoctor,
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
 	cfg := config.Get()
+	configDirErr := config.EnsureDir(cfg)
 	checks := []output.DoctorCheck{}
+	checks = append(checks, permissionDoctorCheck(cfg))
 
 	// Check 1: Config directory
 	configCheck := output.DoctorCheck{
 		Name:   "Config directory",
 		Status: "ok",
 	}
-	if err := config.EnsureDir(cfg); err != nil {
+	if configDirErr != nil {
 		configCheck.Status = "error"
-		configCheck.Message = err.Error()
+		configCheck.Message = configDirErr.Error()
 	} else {
 		configCheck.Message = cfg.StoreDir
 	}
@@ -43,28 +46,16 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	checks = append(checks, executableDoctorChecks()...)
 
 	// Check 2: Auth status
-	authCheck := output.DoctorCheck{
-		Name:   "Authentication",
-		Status: "ok",
-	}
 	creds, err := auth.LoadCredentials(cfg)
-	if err != nil {
-		authCheck.Status = "error"
-		authCheck.Message = "Not authenticated (run: slacli auth)"
-	} else if creds.IsExpired() {
-		authCheck.Status = "warning"
-		authCheck.Message = fmt.Sprintf("Token expired at %s (run: slacli auth --refresh)", creds.ExpiresAt)
-	} else {
-		authCheck.Message = fmt.Sprintf("Valid until %s", creds.ExpiresAt)
-	}
-	checks = append(checks, authCheck)
+	checks = append(checks, authenticationDoctorCheck(creds, err))
 
 	// Check 3: Database
 	dbCheck := output.DoctorCheck{
 		Name:   "Database",
 		Status: "ok",
 	}
-	store, err := db.Open(cfg)
+	var store *db.Store
+	store, err = db.Open(cfg)
 	if err != nil {
 		dbCheck.Status = "error"
 		dbCheck.Message = err.Error()
@@ -88,12 +79,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 	if store != nil {
 		state, err := db.LoadSyncState(cfg)
-		if err != nil {
-			syncCheck.Status = "warning"
-			syncCheck.Message = "Never synced (run: slacli sync)"
-		} else {
-			syncCheck.Message = fmt.Sprintf("Last sync: %s", state.LastSync)
-		}
+		syncCheck = syncStateDoctorCheck(state, err, time.Now())
 	}
 	checks = append(checks, syncCheck)
 
@@ -121,6 +107,81 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	output.Print(output.DoctorResult{Checks: checks})
 	return nil
+}
+
+func authenticationDoctorCheck(creds *auth.Credentials, err error) output.DoctorCheck {
+	check := output.DoctorCheck{Name: "Authentication", Status: "ok"}
+	if err != nil {
+		check.Status = "error"
+		check.Message = "Not authenticated (run: slacli auth)"
+		return check
+	}
+	if creds.IsExpired() {
+		check.Status = "warning"
+		check.Message = fmt.Sprintf("Token expired at %s (run: slacli auth --refresh)", creds.ExpiresAt)
+		return check
+	}
+	if creds.ExpiresAt == "" {
+		check.Message = "Token expiry is not set"
+		return check
+	}
+	check.Message = fmt.Sprintf("Valid until %s", creds.ExpiresAt)
+	return check
+}
+
+func syncStateDoctorCheck(state *db.SyncState, err error, now time.Time) output.DoctorCheck {
+	check := output.DoctorCheck{Name: "Sync state", Status: "ok"}
+	if err != nil || state == nil || state.LastSync == "" {
+		check.Status = "warning"
+		check.Message = "Never synced (run: slacli sync)"
+		return check
+	}
+	lastSync, err := time.Parse(time.RFC3339, state.LastSync)
+	if err != nil {
+		check.Status = "warning"
+		check.Message = "Last sync time is invalid (run: slacli sync)"
+		return check
+	}
+	if age := now.Sub(lastSync); age > 24*time.Hour {
+		check.Status = "warning"
+		check.Message = fmt.Sprintf("Last sync is older than 24 hours (%s ago; run: slacli sync)", age.Round(time.Hour))
+		return check
+	}
+	check.Message = fmt.Sprintf("Last sync: %s", state.LastSync)
+	return check
+}
+
+func permissionDoctorCheck(cfg *config.Config) output.DoctorCheck {
+	check := output.DoctorCheck{Name: "Store permissions", Status: "ok"}
+	issues, err := config.CheckPermissions(cfg)
+	if err != nil {
+		check.Status = "error"
+		check.Message = err.Error()
+		return check
+	}
+	if len(issues) == 0 {
+		check.Message = "Store permissions are secure (0700 directory, 0600 files)"
+		return check
+	}
+
+	if err := config.RepairPermissions(cfg); err != nil {
+		check.Status = "error"
+		check.Message = fmt.Sprintf("Could not repair store permissions: %v", err)
+		return check
+	}
+	remaining, err := config.CheckPermissions(cfg)
+	if err != nil {
+		check.Status = "error"
+		check.Message = fmt.Sprintf("Could not verify repaired store permissions: %v", err)
+		return check
+	}
+	if len(remaining) > 0 {
+		check.Status = "warning"
+		check.Message = "Store permissions still need attention after repair"
+		return check
+	}
+	check.Message = fmt.Sprintf("Repaired permissions for %d store entries (0700 directory, 0600 files)", len(issues))
+	return check
 }
 
 func executableDoctorChecks() []output.DoctorCheck {
